@@ -282,14 +282,56 @@ export function bytesToBase64(bytes: Uint8Array): string {
  * Transcribe spoken audio from a video/audio file via Workers AI Whisper.
  * Returns the transcript text, or null when unavailable/failed.
  */
+/** True when some backend can turn audio into text on this deployment. */
+export function transcriptionAvailable(env: Env): boolean {
+  return Boolean(env.AI || env.WHISPER_API_KEY);
+}
+
 export async function transcribeAudio(env: Env, media: Uint8Array): Promise<string | null> {
-  if (!env.AI) return null;
+  // Cloudflare: the free Workers AI binding.
+  if (env.AI) {
+    try {
+      const result: any = await env.AI.run(
+        '@cf/openai/whisper-large-v3-turbo' as any,
+        { audio: bytesToBase64(media) } as any,
+      );
+      const text = typeof result?.text === 'string' ? result.text.trim() : '';
+      if (text.length > 0) return text;
+    } catch {
+      /* fall through to the HTTP provider, if one is configured */
+    }
+  }
+  // Anywhere else (Vercel): any OpenAI-compatible /audio/transcriptions
+  // endpoint — Groq and OpenAI both speak this exact shape.
+  return transcribeOverHttp(env, media);
+}
+
+const DEFAULT_WHISPER_URL = 'https://api.groq.com/openai/v1/audio/transcriptions';
+const DEFAULT_WHISPER_MODEL = 'whisper-large-v3-turbo';
+
+async function transcribeOverHttp(env: Env, media: Uint8Array): Promise<string | null> {
+  if (!env.WHISPER_API_KEY) return null;
   try {
-    const result: any = await env.AI.run(
-      '@cf/openai/whisper-large-v3-turbo' as any,
-      { audio: bytesToBase64(media) } as any,
-    );
-    const text = typeof result?.text === 'string' ? result.text.trim() : '';
+    const form = new FormData();
+    // The extension matters to these APIs; reels are always MP4 containers.
+    // These bytes always come from fetch(), so the backing store is a plain
+    // ArrayBuffer; the cast just drops the SharedArrayBuffer half of the type.
+    const buffer = media.buffer.slice(
+      media.byteOffset,
+      media.byteOffset + media.byteLength,
+    ) as ArrayBuffer;
+    form.append('file', new Blob([buffer], { type: 'video/mp4' }), 'audio.mp4');
+    form.append('model', env.WHISPER_MODEL || DEFAULT_WHISPER_MODEL);
+    form.append('response_format', 'json');
+    const res = await fetch(env.WHISPER_API_URL || DEFAULT_WHISPER_URL, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${env.WHISPER_API_KEY}` },
+      body: form,
+      signal: AbortSignal.timeout(60000),
+    });
+    if (!res.ok) return null;
+    const payload = (await res.json()) as { text?: string };
+    const text = typeof payload.text === 'string' ? payload.text.trim() : '';
     return text.length > 0 ? text : null;
   } catch {
     return null;

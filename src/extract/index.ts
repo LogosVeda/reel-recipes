@@ -4,7 +4,7 @@ import type { Env, ExtractResult, Ingredient, Platform, Recipe, Step } from '../
 import { extractJsonLdRecipe } from './jsonld.js';
 import { detectPlatform, fetchContent, fetchImageBytes, fetchVideoBytes } from './platforms.js';
 import { validateUrl } from './url.js';
-import { bytesToBase64, llmAvailable, sniffImageType, structureRecipeImage, structureRecipeText, transcribeAudio } from '../llm.js';
+import { bytesToBase64, llmAvailable, sniffImageType, structureRecipeImage, structureRecipeText, transcribeAudio, transcriptionAvailable } from '../llm.js';
 import { detectMinutes, parseIngredientLine } from '../scale.js';
 import { newRecipeId, saveRecipe } from '../store.js';
 
@@ -202,9 +202,9 @@ async function transcribeAndStructure(
   captionText: string,
   ctx: LlmContext,
 ): Promise<{ result: ExtractResult | null; audio: AudioOutcome }> {
-  // Whisper only exists on the Workers AI binding — on other hosts say so
-  // rather than blaming the platform for withholding the video.
-  if (!env.AI) return { result: null, audio: 'unsupported' };
+  // Transcription needs either the Workers AI binding or an HTTP Whisper key —
+  // without one, say so rather than blaming the platform for withholding video.
+  if (!transcriptionAvailable(env)) return { result: null, audio: 'unsupported' };
   if (!content.videoUrl) return { result: null, audio: 'no-video' };
   const media = await fetchVideoBytes(content.videoUrl);
   if (!media) return { result: null, audio: 'unfetchable' };

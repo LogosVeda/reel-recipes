@@ -106,4 +106,9 @@ export interface Env {
   // Vercel (or any host without Cloudflare KV): Upstash Redis REST credentials.
   UPSTASH_REDIS_REST_URL?: string;
   UPSTASH_REDIS_REST_TOKEN?: string;
+  // Speech-to-text for hosts without the Workers AI binding. Any
+  // OpenAI-compatible /audio/transcriptions endpoint (Groq, OpenAI).
+  WHISPER_API_KEY?: string;
+  WHISPER_API_URL?: string;
+  WHISPER_MODEL?: string;
 }

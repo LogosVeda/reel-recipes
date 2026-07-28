@@ -88,6 +88,7 @@ bindings have no Vercel equivalent, so they are replaced by services:
 |---|---|---|
 | KV binding (`RECIPES`) | Upstash Redis REST (free tier) | **Required** — recipe links break without it |
 | Workers AI binding (`AI`) | `ANTHROPIC_API_KEY` | **Required** — nothing can be extracted without an AI backend |
+| Workers AI Whisper | `WHISPER_API_KEY` (Groq or OpenAI) | Optional — only spoken-recipe reels need it |
 
 1. Push this repo to GitHub, then in Vercel: **Add New → Project → Import**.
    Framework preset: **Other**. No build command is needed.
@@ -99,11 +100,14 @@ bindings have no Vercel equivalent, so they are replaced by services:
 4. Deploy. Update the API URL inside `public/shortcut.html` and rebuild the
    iOS shortcut if you want the Share Sheet to point at the Vercel domain.
 
-**What changes on Vercel:** spoken-recipe transcription is Cloudflare-only —
-Whisper runs on the Workers AI binding, and Anthropic has no audio model. The
-app degrades honestly (it says audio couldn't be checked rather than blaming
-the platform). Caption, website, screenshot, cover-image and translation
-extraction all work identically. Claude vision is used for screenshots.
+**What changes on Vercel:** everything works, but transcription is no longer
+free. On Cloudflare, Whisper runs on the Workers AI binding at no cost; on
+Vercel you supply `WHISPER_API_KEY` for any OpenAI-compatible
+`/audio/transcriptions` endpoint (Groq by default, OpenAI by overriding
+`WHISPER_API_URL`/`WHISPER_MODEL`). Leave it unset and the app simply says
+the audio couldn't be checked instead of pretending the platform withheld the
+video. Caption, website, screenshot, cover-image and translation extraction
+are identical; Claude vision reads screenshots.
 
 ## API
 
