@@ -2,7 +2,6 @@
 // structured Recipe via an LLM. Uses Claude when ANTHROPIC_API_KEY is set,
 // otherwise falls back to Cloudflare Workers AI so the app works with zero
 // external accounts.
-import Anthropic from '@anthropic-ai/sdk';
 import type { Env, Ingredient, Recipe, Step } from './types';
 
 // JSON schema the LLM must fill in. Kept flat and strict so both Claude
@@ -140,18 +139,51 @@ export async function structureRecipeText(env: Env, text: string, isTranscript =
   return normalize(raw);
 }
 
-async function runClaude(env: Env, text: string, isTranscript = false): Promise<any> {
-  const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
-  const response = await client.messages.create({
-    model: 'claude-opus-4-8',
-    max_tokens: 16000,
-    system: SYSTEM_PROMPT,
-    output_config: {
-      format: {
-        type: 'json_schema',
-        schema: RECIPE_SCHEMA as unknown as Record<string, unknown>,
-      },
+/**
+ * Call Claude's Messages API over plain fetch.
+ *
+ * Deliberately not the official SDK: it pulls in node:fs/node:path, which
+ * Vercel's Edge runtime rejects outright and which Cloudflare only tolerates
+ * behind nodejs_compat. fetch is available on every runtime this app targets.
+ */
+async function callClaude(
+  env: Env,
+  body: {
+    system: string;
+    messages: unknown[];
+    schema: unknown;
+    maxTokens?: number;
+  },
+): Promise<any> {
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': env.ANTHROPIC_API_KEY ?? '',
+      'anthropic-version': '2023-06-01',
     },
+    body: JSON.stringify({
+      model: 'claude-opus-4-8',
+      max_tokens: body.maxTokens ?? 16000,
+      system: body.system,
+      output_config: { format: { type: 'json_schema', schema: body.schema } },
+      messages: body.messages,
+    }),
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    throw new Error(`Claude API ${response.status}: ${detail.slice(0, 200)}`);
+  }
+  const payload = (await response.json()) as { content?: Array<{ type: string; text?: string }> };
+  const block = payload.content?.find((b) => b.type === 'text' && typeof b.text === 'string');
+  if (!block?.text) throw new Error('LLM returned no text content');
+  return JSON.parse(block.text);
+}
+
+async function runClaude(env: Env, text: string, isTranscript = false): Promise<any> {
+  return callClaude(env, {
+    system: SYSTEM_PROMPT,
+    schema: RECIPE_SCHEMA,
     messages: [
       {
         role: 'user',
@@ -159,9 +191,6 @@ async function runClaude(env: Env, text: string, isTranscript = false): Promise<
       },
     ],
   });
-  const block = response.content.find((b) => b.type === 'text');
-  if (!block) throw new Error('LLM returned no text content');
-  return JSON.parse(block.text);
 }
 
 /**
@@ -302,17 +331,9 @@ async function runClaudeVision(
   imageB64: string,
   mediaType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp',
 ): Promise<any> {
-  const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
-  const response = await client.messages.create({
-    model: 'claude-opus-4-8',
-    max_tokens: 16000,
+  return callClaude(env, {
     system: SYSTEM_PROMPT + IMAGE_PROMPT_SUFFIX,
-    output_config: {
-      format: {
-        type: 'json_schema',
-        schema: RECIPE_SCHEMA as unknown as Record<string, unknown>,
-      },
-    },
+    schema: RECIPE_SCHEMA,
     messages: [
       {
         role: 'user',
@@ -323,9 +344,6 @@ async function runClaudeVision(
       },
     ],
   });
-  const block = response.content.find((b) => b.type === 'text');
-  if (!block) throw new Error('LLM returned no text content');
-  return JSON.parse(block.text);
 }
 
 async function runWorkersAiVision(
@@ -529,19 +547,11 @@ export async function translateRecipe(env: Env, recipe: Recipe, targetLang: stri
     let raw: any;
     try {
       if (env.ANTHROPIC_API_KEY) {
-        const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
-        const response = await client.messages.create({
-          model: 'claude-opus-4-8',
-          max_tokens: 16000,
+        raw = await callClaude(env, {
           system,
-          output_config: {
-            format: { type: 'json_schema', schema: TRANSLATE_SCHEMA as unknown as Record<string, unknown> },
-          },
+          schema: TRANSLATE_SCHEMA,
           messages: [{ role: 'user', content: JSON.stringify(input) }],
         });
-        const block = response.content.find((b) => b.type === 'text');
-        if (!block) continue;
-        raw = JSON.parse(block.text);
       } else if (env.AI) {
         const payload = await runAi(env, '@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
           messages: [
