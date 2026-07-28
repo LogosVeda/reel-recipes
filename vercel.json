@@ -1,0 +1,16 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "cleanUrls": true,
+  "rewrites": [
+    { "source": "/((?!_next|.*\\..*).*)", "destination": "/api" }
+  ],
+  "headers": [
+    {
+      "source": "/save-recipe.shortcut",
+      "headers": [
+        { "key": "Content-Type", "value": "application/octet-stream" },
+        { "key": "Content-Disposition", "value": "attachment; filename=\"Save Recipe.shortcut\"" }
+      ]
+    }
+  ]
+}

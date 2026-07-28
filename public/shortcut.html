@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#faf1ce">
+  <title>iPhone Shortcut — Reel Recipes</title>
+  <link rel="stylesheet" href="/styles.css?v=7">
+</head>
+<body>
+  <header>
+    <a class="back-link" href="/">← Reel Recipes</a>
+    <h1>Save recipes to Apple Notes from the Share Sheet</h1>
+    <p class="sub">Apple Notes has no public API, so a tiny iOS Shortcut does the last step.
+      Install it below, and from then on saving a recipe is one tap from Instagram,
+      TikTok, or Safari.</p>
+  </header>
+
+  <main>
+    <section class="get-box">
+      <a class="btn btn-primary" href="/save-recipe.shortcut" download="Save Recipe.shortcut">Get the Shortcut</a>
+      <p class="sub">On your iPhone: tap the button, open the downloaded file, and tap
+        <strong>Add Shortcut</strong>. That's the whole setup — the recipe appears in
+        Apple Notes whenever you share a link to <strong>Save Recipe</strong>.</p>
+    </section>
+
+    <details class="manual">
+      <summary>Prefer to build it by hand? The 5 steps</summary>
+    <ol class="steps">
+      <li class="card">
+        <span class="step-num">1</span>
+        <h3>Create the shortcut</h3>
+        <p>Open the <strong>Shortcuts</strong> app → tap <code>+</code> → rename it to
+          <code>Save Recipe</code>.</p>
+      </li>
+
+      <li class="card">
+        <span class="step-num">2</span>
+        <h3>Show it in the Share Sheet</h3>
+        <p>Tap the info button <code>(i)</code> → enable <strong>Show in Share Sheet</strong>.
+          Set the input type to <strong>URLs</strong>.</p>
+        <p class="sub">On newer iOS this appears as
+          "Receive <strong>URLs</strong> input from Share Sheet". Keep it to URLs —
+          sharing a reel sends its link, which is exactly what this shortcut posts.
+          (To save a recipe you've copied as <em>text</em>, open the website in Safari
+          and use its paste box instead.)</p>
+      </li>
+
+      <li class="card">
+        <span class="step-num">3</span>
+        <h3>Call this site</h3>
+        <p>Add the action <strong>Get Contents of URL</strong>, then tap the
+          <code>⌄</code> ("Show More") to reveal all its options and set:</p>
+        <ul>
+          <li>URL: <span class="origin">https://this-site</span><code>/api/extract</code></li>
+          <li>Method: <code>POST</code></li>
+          <li>Request Body: <code>JSON</code></li>
+          <li>Add field <code>url</code> (Text) = <strong>Shortcut Input</strong></li>
+        </ul>
+      </li>
+
+      <li class="card">
+        <span class="step-num">4</span>
+        <h3>Pull out the note</h3>
+        <p>Add the action <strong>Get Dictionary Value</strong> →
+          Key = <code>noteText</code> → from <strong>Contents of URL</strong>.</p>
+      </li>
+
+      <li class="card">
+        <span class="step-num">5</span>
+        <h3>Save to Notes — or show why not</h3>
+        <p>Add an <strong>If</strong> action → condition:
+          <strong>Dictionary Value</strong> (the <code>noteText</code>)
+          <strong>has any value</strong>.</p>
+        <ul>
+          <li><strong>If</strong> → <strong>Create Note</strong> (Notes app),
+            Body = <strong>Dictionary Value</strong>. Pick a folder like
+            <code>Recipes</code> and turn off <strong>Show Compose Sheet</strong>
+            so it saves automatically.</li>
+          <li><strong>Otherwise</strong> → <strong>Get Dictionary Value</strong>
+            (Key <code>message</code>, from Contents of URL) → then
+            <strong>Show Result</strong> to display it.</li>
+        </ul>
+        <p class="sub">Why the If: when a reel has no written recipe the site replies
+          with an explanation instead of a note. <strong>Get Contents of URL keeps
+          going on that reply</strong> (it only stops on a real network error), so
+          this branch is what surfaces the message instead of saving a blank note.</p>
+      </li>
+
+      <li class="card">
+        <span class="step-num">6</span>
+        <h3>Done — try it</h3>
+        <p>In Instagram or TikTok: tap <strong>Share → Save Recipe</strong>.
+          The note appears in Notes with tappable timers and a shopping-list link.</p>
+      </li>
+    </ol>
+    </details>
+
+    <section class="card box-optional">
+      <span class="tag">Optional · recommended</span>
+      <h3>Save from a screenshot</h3>
+      <p>For recipes that live in the <strong>comments</strong> or as
+        <strong>on-screen text in the video</strong>: take a screenshot, then share
+        <em>the screenshot</em> to a second shortcut. Create one named
+        <code>Save Recipe Photo</code>:</p>
+      <ol>
+        <li>Info <code>(i)</code> → Show in Share Sheet → input type <strong>Images</strong>.</li>
+        <li>Action <strong>Convert Image</strong> → to <code>JPEG</code> (shrinks the upload).</li>
+        <li>Action <strong>Base64 Encode</strong> → input = Converted Image.</li>
+        <li>Action <strong>Get Contents of URL</strong> → same setup as step 3 above, but the
+          JSON field is <code>image</code> (Text) = <strong>Base64 Encoded</strong>.</li>
+        <li>Then the same <strong>Get Dictionary Value → If → Create Note</strong> ending as steps 4–5.</li>
+      </ol>
+      <p class="sub">Works for anything readable: comment recipes, on-screen captions,
+        cookbook pages, even handwriting.</p>
+      <p class="sub"><strong>Recipe longer than one screen?</strong> Take several
+        screenshots, select them all in Photos → Share → <code>Save Recipe Photo</code>,
+        and add a <strong>Combine Images</strong> action (Vertically) as the first step
+        of the shortcut — they merge into one tall image before upload. On the website,
+        just select all the screenshots at once; it combines them for you.</p>
+    </section>
+
+    <section class="card box-optional">
+      <span class="tag">Optional · zero-effort mode</span>
+      <h3>Double-tap the back of your phone</h3>
+      <p>Skip even the manual screenshot: let the shortcut take it for you.
+        Create a shortcut named <code>Snap Recipe</code>:</p>
+      <ol>
+        <li>Action <strong>Take Screenshot</strong> (captures whatever is on screen).</li>
+        <li>Action <strong>Convert Image</strong> → to <code>JPEG</code>.</li>
+        <li>Action <strong>Base64 Encode</strong> → input = Converted Image.</li>
+        <li>Action <strong>Get Contents of URL</strong> → same POST setup, JSON field
+          <code>image</code> = <strong>Base64 Encoded</strong>.</li>
+        <li>Same <strong>Get Dictionary Value → If → Create Note</strong> ending.</li>
+      </ol>
+      <p>Then wire it to a gesture: <strong>Settings → Accessibility → Touch →
+        Back Tap → Double Tap → Snap Recipe</strong>.</p>
+      <p class="sub">Usage: scroll until the recipe (comment or on-screen text) is
+        visible → double-tap the back of your iPhone → the note appears in Notes.
+        That's the whole flow.</p>
+    </section>
+
+    <section class="card box-optional">
+      <span class="tag">Optional</span>
+      <h3>Ask for servings</h3>
+      <p>Want the note scaled to your table? Insert an <strong>Ask for Input</strong>
+        action (type <strong>Number</strong>, prompt <code>How many servings?</code>)
+        before step 3, then add a second JSON field in Get Contents of URL:
+        <code>servings</code> (type <strong>Number</strong>) = <strong>Provided Input</strong>.</p>
+    </section>
+
+    <section class="card tip">
+      <h3>Tip</h3>
+      <p>The same shortcut works from <strong>Safari</strong> on any recipe website —
+        and you can test it right now by sharing any food-blog URL to
+        <strong>Save Recipe</strong>.</p>
+    </section>
+  </main>
+
+  <footer>
+    <a class="footer-link" href="/">← Back to Reel Recipes</a>
+  </footer>
+
+  <script>
+  (function () {
+    'use strict';
+    // Fill in this deployment's origin wherever the instructions reference it.
+    var els = document.querySelectorAll('.origin');
+    for (var i = 0; i < els.length; i++) {
+      els[i].textContent = location.origin;
+    }
+  })();
+  </script>
+</body>
+</html>

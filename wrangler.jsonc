@@ -1,0 +1,27 @@
+{
+  // Reel Recipes — paste a reel/recipe link, get a clean scalable recipe note.
+  "name": "reel-recipes",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-01",
+  // Required by @anthropic-ai/sdk (it imports Node built-ins on Workers).
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "public",
+    "binding": "ASSETS"
+  },
+  // KV stores extracted recipes so note links (/r/:id, timers, shopping list) keep working.
+  "kv_namespaces": [
+    { "binding": "RECIPES", "id": "509512c99f4a487a8b05c5e38ae97dba" }
+  ],
+  // Workers AI — free-tier LLM fallback used when no ANTHROPIC_API_KEY secret is set.
+  "ai": { "binding": "AI" },
+  "vars": {
+    // LLM backend selection (honored by src/llm.ts):
+    //   "auto"       = Claude if ANTHROPIC_API_KEY secret is set, else Workers AI
+    //   "anthropic"  = force Claude (requires the secret)
+    //   "workers-ai" = force the free Workers AI tier
+    // Set the Claude secret with:  npx wrangler secret put ANTHROPIC_API_KEY
+    "LLM_PROVIDER": "auto"
+  },
+  "observability": { "enabled": true }
+}

@@ -1,0 +1,21 @@
+{
+  // Local-dev config: identical to wrangler.jsonc but WITHOUT the Workers AI
+  // binding, which requires a Cloudflare login even in local mode. Locally,
+  // JSON-LD extraction works fully; caption extraction needs ANTHROPIC_API_KEY
+  // in .dev.vars. Deploys always use wrangler.jsonc.
+  "name": "reel-recipes",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-01",
+  // Required by @anthropic-ai/sdk (it imports Node built-ins on Workers).
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "public",
+    "binding": "ASSETS"
+  },
+  "kv_namespaces": [
+    { "binding": "RECIPES", "id": "local-dev" }
+  ],
+  "vars": {
+    "LLM_PROVIDER": "auto"
+  }
+}

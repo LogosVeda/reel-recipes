@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#faf1ce">
+  <title>Timer — Reel Recipes</title>
+  <link rel="stylesheet" href="/styles.css?v=7">
+</head>
+<body class="timer-page">
+  <p id="label" class="timer-label">Kitchen timer</p>
+  <div id="display" class="timer-display" role="timer" aria-live="off">10:00</div>
+  <div class="timer-buttons">
+    <button id="startPause" class="btn btn-primary" type="button">Pause</button>
+    <button id="plus" class="btn btn-secondary" type="button">+1 min</button>
+    <button id="reset" class="btn btn-secondary" type="button">Reset</button>
+  </div>
+  <p id="soundHint" class="footnote" style="margin-top:20px" hidden>Tap anywhere to enable the alarm sound.</p>
+  <p class="footnote" style="margin-top:12px">Keep this tab open — the timer keeps counting in the background.</p>
+
+  <script>
+  (function () {
+    'use strict';
+
+    // --- read ?m=&s=&l= ---
+    var params = new URLSearchParams(location.search);
+    var mParam = params.get('m');
+    var sParam = params.get('s');
+    var m = parseInt(mParam || '', 10);
+    var s = parseInt(sParam || '', 10);
+    if (isNaN(m) || m < 0) m = 0;
+    if (isNaN(s) || s < 0) s = 0;
+    var initialMs = (m * 60 + s) * 1000;
+    // A duration param that parses to nothing (m=0, garbage) should NOT silently
+    // auto-run a fabricated 10-minute timer under the linked step's label.
+    var badDuration = (mParam !== null || sParam !== null) && initialMs <= 0;
+    if (initialMs <= 0) initialMs = 10 * 60 * 1000; // default: 10 minutes
+
+    var baseTitle = params.get('l') || 'Kitchen timer';
+    document.getElementById('label').textContent = baseTitle;
+
+    var displayEl = document.getElementById('display');
+    var startPauseBtn = document.getElementById('startPause');
+    var plusBtn = document.getElementById('plus');
+    var resetBtn = document.getElementById('reset');
+
+    // Time is always derived from an absolute end timestamp so the countdown
+    // stays correct when the tab is backgrounded and interval ticks are throttled.
+    var endAt = 0;              // ms epoch while running
+    var remainingMs = initialMs; // remaining while paused/stopped
+    var running = false;
+    var done = false;
+    var tickId = null;
+    var flashId = null;
+
+    function fmt(ms) {
+      var total = Math.max(0, Math.ceil(ms / 1000));
+      var mm = Math.floor(total / 60);
+      var ss = total % 60;
+      return mm + ':' + (ss < 10 ? '0' : '') + ss;
+    }
+
+    function render(ms) {
+      displayEl.textContent = fmt(ms);
+      if (!done) document.title = fmt(ms) + ' — ' + baseTitle;
+    }
+
+    // --- audio (WebAudio beep) ---
+    // Auto-start means the AudioContext may begin suspended; any tap resumes it.
+    // Until it's running, show a hint so the alarm isn't silently muted on iOS.
+    var audioCtx = null;
+    var soundHint = document.getElementById('soundHint');
+
+    function updateSoundHint() {
+      var locked = !audioCtx || audioCtx.state !== 'running';
+      soundHint.hidden = !locked;
+    }
+
+    function ensureAudio() {
+      if (!audioCtx) {
+        var AC = window.AudioContext || window.webkitAudioContext;
+        if (AC) {
+          audioCtx = new AC();
+          audioCtx.onstatechange = updateSoundHint;
+        }
+      }
+      if (audioCtx && audioCtx.state === 'suspended') {
+        audioCtx.resume().catch(function () {});
+      }
+      updateSoundHint();
+    }
+
+    document.addEventListener('touchstart', ensureAudio, true);
+    document.addEventListener('click', ensureAudio, true);
+
+    // Try immediately; on iOS this stays suspended until a tap, revealing the hint.
+    ensureAudio();
+
+    function beepOnce() {
+      if (!audioCtx || audioCtx.state !== 'running') return;
+      var t = audioCtx.currentTime;
+      var osc = audioCtx.createOscillator();
+      var gain = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = 880;
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.exponentialRampToValueAtTime(0.4, t + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.45);
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start(t);
+      osc.stop(t + 0.5);
+    }
+
+    var beepId = null;
+
+    function startAlarm() {
+      ensureAudio();
+      beepOnce();
+      if (navigator.vibrate) navigator.vibrate([400, 200, 400, 200, 400]);
+      beepId = setInterval(function () {
+        beepOnce();
+        if (navigator.vibrate) navigator.vibrate([400, 200, 400]);
+      }, 1200);
+      document.body.classList.add('timer-done');
+      document.title = 'Done!';
+      var flip = false;
+      flashId = setInterval(function () {
+        flip = !flip;
+        document.title = flip ? baseTitle : 'Done!';
+      }, 900);
+    }
+
+    function stopAlarm() {
+      if (beepId) { clearInterval(beepId); beepId = null; }
+      if (flashId) { clearInterval(flashId); flashId = null; }
+      document.body.classList.remove('timer-done');
+      if (navigator.vibrate) navigator.vibrate(0);
+    }
+
+    // --- screen wake lock while running ---
+    var wakeLock = null;
+
+    function acquireWakeLock() {
+      if (!('wakeLock' in navigator)) return;
+      try {
+        navigator.wakeLock.request('screen').then(function (lock) {
+          wakeLock = lock;
+        }).catch(function () {});
+      } catch (e) { /* unsupported */ }
+    }
+
+    function releaseWakeLock() {
+      if (wakeLock) {
+        try { wakeLock.release().catch(function () {}); } catch (e) {}
+        wakeLock = null;
+      }
+    }
+
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible') {
+        // Wake locks are auto-released when the page is hidden; re-acquire,
+        // and repaint immediately in case interval ticks were throttled.
+        if (running) {
+          acquireWakeLock();
+          tick();
+        }
+      }
+    });
+
+    // --- countdown core ---
+    function tick() {
+      if (!running) return;
+      var left = endAt - Date.now();
+      if (left <= 0) {
+        running = false;
+        done = true;
+        remainingMs = 0;
+        if (tickId) { clearInterval(tickId); tickId = null; }
+        render(0);
+        startPauseBtn.textContent = 'Start';
+        releaseWakeLock();
+        startAlarm();
+        return;
+      }
+      render(left);
+    }
+
+    function start() {
+      if (running) return;
+      if (done || remainingMs <= 0) {
+        // Restart from the original duration after the alarm.
+        stopAlarm();
+        done = false;
+        remainingMs = initialMs;
+      }
+      endAt = Date.now() + remainingMs;
+      running = true;
+      startPauseBtn.textContent = 'Pause';
+      tickId = setInterval(tick, 250);
+      render(remainingMs);
+      acquireWakeLock();
+    }
+
+    function pause() {
+      if (!running) return;
+      remainingMs = Math.max(0, endAt - Date.now());
+      running = false;
+      startPauseBtn.textContent = 'Start';
+      if (tickId) { clearInterval(tickId); tickId = null; }
+      releaseWakeLock();
+    }
+
+    startPauseBtn.addEventListener('click', function () {
+      ensureAudio();
+      if (running) { pause(); } else { start(); }
+    });
+
+    resetBtn.addEventListener('click', function () {
+      stopAlarm();
+      done = false;
+      running = false;
+      if (tickId) { clearInterval(tickId); tickId = null; }
+      remainingMs = initialMs;
+      startPauseBtn.textContent = 'Start';
+      render(remainingMs);
+      releaseWakeLock();
+    });
+
+    plusBtn.addEventListener('click', function () {
+      ensureAudio();
+      if (done) {
+        stopAlarm();
+        done = false;
+        remainingMs = 60000;
+        start();
+      } else if (running) {
+        endAt += 60000;
+        tick();
+      } else {
+        remainingMs += 60000;
+        render(remainingMs);
+      }
+    });
+
+    // Auto-start on load — unless the duration param was invalid, in which case
+    // leave it paused at the 10:00 default so nothing fabricated runs silently.
+    render(remainingMs);
+    if (badDuration) {
+      startPauseBtn.textContent = 'Start';
+    } else {
+      start();
+    }
+  })();
+  </script>
+</body>
+</html>
