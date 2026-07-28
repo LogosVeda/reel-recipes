@@ -125,8 +125,15 @@ app.get('/r/:id/list', async (c) => {
 app.notFound((c) => {
   // API clients (the iOS Shortcut) must get a JSON error, not the homepage HTML,
   // so a typo'd path fails loudly instead of confusing "Get Dictionary Value".
-  if (new URL(c.req.url).pathname.startsWith('/api/')) {
+  const path = new URL(c.req.url).pathname;
+  if (path.startsWith('/api/')) {
     return c.json({ ok: false, message: 'Not found' }, 404);
+  }
+  // Never redirect '/' to itself. The homepage is a static asset on every host;
+  // if a request for it reaches the app, static serving is misconfigured and
+  // redirecting would spin forever rather than surface the problem.
+  if (path === '/') {
+    return c.html(homeMissingPage(), 500);
   }
   return c.redirect('/');
 });
@@ -140,6 +147,16 @@ app.onError((err, c) => {
   }
   return c.html(notFoundPage(), 500);
 });
+
+/** Shown only when the homepage asset isn't being served by the host. */
+function homeMissingPage(): string {
+  return `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reel Recipes</title>
+<body style="font-family:-apple-system,sans-serif;text-align:center;padding:4rem 1rem">
+<h1>Almost there</h1><p>The app is running, but its homepage file isn't being served.
+Check that <code>public/</code> is deployed as static assets.</p>
+<p><a href="/shortcut">iPhone Shortcut setup</a></p></body>`;
+}
 
 function notFoundPage(): string {
   return `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
