@@ -35,6 +35,25 @@ function pickLang(c: { req: { query: (k: string) => string | undefined; header: 
   return m ? m[1]!.toLowerCase() : null;
 }
 
+// Cloudflare serves the homepage from its assets binding before the Worker
+// ever runs, so this route is only reached on hosts (Vercel) that route '/'
+// into the function. Fetch the static file from our own origin rather than
+// duplicating it in code.
+app.get('/', async (c) => {
+  try {
+    const res = await fetch(new URL('/index.html', c.req.url).toString());
+    if (res.ok) {
+      return new Response(res.body, {
+        status: 200,
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+      });
+    }
+  } catch {
+    /* fall through to the diagnostic page */
+  }
+  return c.html(homeMissingPage(), 500);
+});
+
 // --- API ---------------------------------------------------------------
 
 // Main entry point, used by both the web UI and the iOS Shortcut.
