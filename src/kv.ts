@@ -2,7 +2,7 @@
 //   - Cloudflare Workers  → the RECIPES KV binding
 //   - Vercel (or anywhere) → Upstash Redis over its REST API (plain fetch, no SDK)
 // Everything else in the app calls kvGet/kvPut and never touches a host API.
-import type { Env } from './types';
+import type { Env } from './types.js';
 
 /** True when some storage backend is configured. */
 export function storageAvailable(env: Env): boolean {

@@ -1,9 +1,9 @@
 // KV persistence for extracted recipes. Recipes are stored by short id so the
 // links baked into an Apple Note (/r/:id, shopping list, timers, scale links)
 // keep working after the note is saved.
-import type { Env, Recipe } from './types';
-import { translateRecipe } from './llm';
-import { kvGet, kvPut } from './kv';
+import type { Env, Recipe } from './types.js';
+import { translateRecipe } from './llm.js';
+import { kvGet, kvPut } from './kv.js';
 
 const TTL_SECONDS = 60 * 60 * 24 * 365; // keep recipes for a year
 

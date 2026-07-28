@@ -1,12 +1,12 @@
 // The extraction pipeline: URL → fetch → structured data (JSON-LD) when the
 // site provides it, otherwise caption/description text → LLM structuring.
-import type { Env, ExtractResult, Ingredient, Platform, Recipe, Step } from '../types';
-import { extractJsonLdRecipe } from './jsonld';
-import { detectPlatform, fetchContent, fetchImageBytes, fetchVideoBytes } from './platforms';
-import { validateUrl } from './url';
-import { bytesToBase64, llmAvailable, sniffImageType, structureRecipeImage, structureRecipeText, transcribeAudio } from '../llm';
-import { detectMinutes, parseIngredientLine } from '../scale';
-import { newRecipeId, saveRecipe } from '../store';
+import type { Env, ExtractResult, Ingredient, Platform, Recipe, Step } from '../types.js';
+import { extractJsonLdRecipe } from './jsonld.js';
+import { detectPlatform, fetchContent, fetchImageBytes, fetchVideoBytes } from './platforms.js';
+import { validateUrl } from './url.js';
+import { bytesToBase64, llmAvailable, sniffImageType, structureRecipeImage, structureRecipeText, transcribeAudio } from '../llm.js';
+import { detectMinutes, parseIngredientLine } from '../scale.js';
+import { newRecipeId, saveRecipe } from '../store.js';
 
 export { validateUrl };
 

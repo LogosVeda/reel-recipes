@@ -1,5 +1,5 @@
-import type { Recipe } from '../types';
-import { formatIngredient } from '../scale';
+import type { Recipe } from '../types.js';
+import { formatIngredient } from '../scale.js';
 
 /** 90 -> '1 hr 30 min', 60 -> '1 hr', 8 -> '8 min' */
 function prettyDuration(minutes: number): string {

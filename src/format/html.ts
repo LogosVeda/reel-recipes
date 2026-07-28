@@ -1,6 +1,6 @@
-import type { Recipe } from '../types';
-import { SUPPORTED_LANGS } from '../llm';
-import { formatIngredient } from '../scale';
+import type { Recipe } from '../types.js';
+import { SUPPORTED_LANGS } from '../llm.js';
+import { formatIngredient } from '../scale.js';
 
 // Recipe content comes from arbitrary websites: every recipe-derived string
 // must pass through esc() before landing in HTML text or attributes.

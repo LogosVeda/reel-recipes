@@ -1,4 +1,4 @@
-import type { Ingredient } from './types';
+import type { Ingredient } from './types.js';
 
 const VULGAR: Record<string, number> = {
   '¼': 1 / 4,

@@ -1,7 +1,7 @@
 // Pure JSON-LD (schema.org/Recipe) extractor. No DOM, no fetch — regex + JSON.parse only,
 // so it runs both in Cloudflare Workers and in vitest under Node.
 
-import { decodeEntities } from './html';
+import { decodeEntities } from './html.js';
 
 export interface JsonLdRecipeData {
   title: string;

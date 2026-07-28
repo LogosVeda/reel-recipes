@@ -1,11 +1,11 @@
 // Reel Recipes — paste/share a reel or recipe link, get a clean, scalable
 // recipe note for Apple Notes with tappable timer and shopping-list links.
 import { Hono } from 'hono';
-import type { Env, Recipe } from './types';
-import { extractFromImage, extractFromPaste, extractFromUrl } from './extract';
-import { buildNoteText } from './format/notes';
-import { renderRecipePage, renderShoppingListPage } from './format/html';
-import { getRecipe, getRecipeInLang } from './store';
+import type { Env, Recipe } from './types.js';
+import { extractFromImage, extractFromPaste, extractFromUrl } from './extract/index.js';
+import { buildNoteText } from './format/notes.js';
+import { renderRecipePage, renderShoppingListPage } from './format/html.js';
+import { getRecipe, getRecipeInLang } from './store.js';
 
 const app = new Hono<{ Bindings: Env }>();
 

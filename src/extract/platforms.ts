@@ -1,8 +1,8 @@
 // Platform detection and network adapters. Runs on Cloudflare Workers (fetch only).
 
-import type { FetchedContent, Platform } from '../types';
-import { extractMeta, htmlToText, looksTruncated, stripFacebookTitleSuffix, unwrapInstagramDescription } from './html';
-import { validateUrl } from './url';
+import type { FetchedContent, Platform } from '../types.js';
+import { extractMeta, htmlToText, looksTruncated, stripFacebookTitleSuffix, unwrapInstagramDescription } from './html.js';
+import { validateUrl } from './url.js';
 
 export function detectPlatform(url: string): Platform {
   let host: string;

@@ -3,8 +3,8 @@
 // The same Hono app powers both hosts. On Cloudflare, bindings arrive as the
 // `env` argument; on Vercel there are no bindings, so env vars are read from
 // process.env and storage falls back to Upstash Redis (see src/kv.ts).
-import app from '../src/index';
-import type { Env } from '../src/types';
+import app from '../src/index.js';
+import type { Env } from '../src/types.js';
 
 export const config = { runtime: 'edge' };
 

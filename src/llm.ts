@@ -2,7 +2,7 @@
 // structured Recipe via an LLM. Uses Claude when ANTHROPIC_API_KEY is set,
 // otherwise falls back to Cloudflare Workers AI so the app works with zero
 // external accounts.
-import type { Env, Ingredient, Recipe, Step } from './types';
+import type { Env, Ingredient, Recipe, Step } from './types.js';
 
 // JSON schema the LLM must fill in. Kept flat and strict so both Claude
 // structured outputs and Workers AI json_schema mode can satisfy it.
