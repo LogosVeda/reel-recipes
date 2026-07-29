@@ -102,6 +102,8 @@ main { flex: 1; display: flex; flex-direction: column; justify-content: center; 
 }
 .brand-label { color: var(--melon-deep); }
 .top-link { color: var(--blue); text-decoration: none; }
+.topbar-links { display: inline-flex; align-items: center; gap: 18px; }
+.top-link[hidden] { display: none; }
 
 /* ---------- hero ---------- */
 
@@ -391,6 +393,90 @@ textarea::placeholder { color: #9aa0bd; }
 footer { margin-top: 30px; text-align: center; }
 .footer-link { color: var(--blue); font-weight: 650; text-decoration: none; }
 .footnote { color: var(--ink-soft); font-size: .82rem; margin: 10px 0 0; }
+
+/* ---------- auth (login / account) ---------- */
+
+.field-label {
+  display: block;
+  font-size: .82rem;
+  font-weight: 650;
+  color: var(--ink-soft);
+  margin: 14px 2px 6px;
+}
+.text-field {
+  width: 100%;
+  min-height: 56px;
+  padding: 0 16px;
+  font-size: 16px;
+  font-family: inherit;
+  color: var(--ink);
+  background: var(--white);
+  border: none;
+  border-radius: 14px;
+  box-shadow: var(--shadow-soft);
+}
+.text-field:focus { outline: none; box-shadow: var(--shadow-soft), 0 0 0 3px var(--blue-pastel); }
+.text-field::placeholder { color: #9aa0bd; }
+
+.auth-switch {
+  margin: 20px 0 0;
+  text-align: center;
+  font-size: .92rem;
+  color: var(--ink-soft);
+}
+.link-btn {
+  border: none;
+  background: none;
+  padding: 4px;
+  font: inherit;
+  font-weight: 700;
+  color: var(--blue);
+  cursor: pointer;
+}
+
+.account-row {
+  background: var(--white);
+  border-radius: 16px;
+  padding: 14px 16px;
+  box-shadow: var(--shadow-soft);
+  margin-top: 14px;
+}
+.account-row .label {
+  font-size: .74rem;
+  font-weight: 700;
+  letter-spacing: .18em;
+  text-transform: uppercase;
+  color: var(--melon-deep);
+  margin: 0 0 6px;
+}
+.account-row .value { margin: 0; font-size: 1rem; word-break: break-all; }
+.token-box {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.token-box code {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  background: var(--mono-bg);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: .84rem;
+}
+.copy-btn {
+  flex: none;
+  min-height: 40px;
+  padding: 0 14px;
+  border: none;
+  border-radius: 10px;
+  background: var(--blue-pastel);
+  color: var(--blue);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
 
 /* ---------- timer page ---------- */
 

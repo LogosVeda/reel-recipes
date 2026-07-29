@@ -2,6 +2,19 @@
 (function () {
   'use strict';
 
+  // Extraction requires an account. Confirm a session on load: signed-in users
+  // get the Account link; everyone else is sent to sign in (and returned here).
+  var accountLink = document.getElementById('account-link');
+  fetch('/api/auth/me', { headers: { Accept: 'application/json' } })
+    .then(function (res) {
+      if (res.ok) {
+        if (accountLink) accountLink.hidden = false;
+      } else {
+        window.location = '/login?next=%2F';
+      }
+    })
+    .catch(function () { /* offline — let the form surface the error on submit */ });
+
   var form = document.getElementById('extract-form');
   var hero = document.getElementById('hero');
   var urlInput = document.getElementById('url');
@@ -472,6 +485,12 @@
             dest += (dest.indexOf('?') === -1 ? '?' : '&') + 'servings=' + servings;
           }
           window.location = dest;
+          return;
+        }
+
+        // Session expired mid-use — send them to sign in and come back here.
+        if (res.status === 401 || (body && body.code === 'unauthorized')) {
+          window.location = '/login?next=%2F';
           return;
         }
 

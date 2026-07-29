@@ -3,6 +3,8 @@
   "rewrites": [
     { "source": "/", "destination": "/index.html" },
     { "source": "/shortcut", "destination": "/shortcut.html" },
+    { "source": "/login", "destination": "/login.html" },
+    { "source": "/account", "destination": "/account.html" },
     { "source": "/t", "destination": "/t.html" },
     { "source": "/api/:path*", "destination": "/api" },
     { "source": "/r/:path*", "destination": "/api" }

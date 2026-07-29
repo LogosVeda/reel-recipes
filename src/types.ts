@@ -44,6 +44,12 @@ export interface RecipeSource {
 
 export interface Recipe {
   id: string;
+  /**
+   * Account that created this recipe. Recipes are private to their owner;
+   * legacy recipes created before accounts existed have no ownerId and stay
+   * publicly viewable so their existing note links keep working.
+   */
+  ownerId?: string | null;
   title: string;
   /** ISO 639-1 code of the language the recipe text is in; null when unknown */
   language?: string | null;

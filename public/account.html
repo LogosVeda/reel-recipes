@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#faf1ce">
+  <title>Account — Reel Recipes</title>
+  <meta name="description" content="Your Reel Recipes account and personal Shortcut token.">
+  <link rel="stylesheet" href="/styles.css?v=8">
+</head>
+<body>
+  <div class="decor" aria-hidden="true">
+    <span class="d-circle"></span>
+    <span class="d-arch"></span>
+    <span class="d-leaf"></span>
+  </div>
+
+  <header class="topbar">
+    <a class="top-link" href="/">← Reel Recipes</a>
+  </header>
+
+  <main>
+    <h1 class="hero">Your account<span class="qm">.</span></h1>
+    <p class="sub">Recipes you generate are private to this account. Use the token below to let your iPhone Shortcut save to it.</p>
+
+    <div class="account-row">
+      <p class="label">Signed in as</p>
+      <p class="value" id="email">…</p>
+    </div>
+
+    <div class="account-row">
+      <p class="label">Shortcut token</p>
+      <div class="token-box">
+        <code id="token">…</code>
+        <button type="button" id="copy" class="copy-btn">Copy</button>
+      </div>
+      <p class="micro">In your Shortcut's <strong>Get Contents of URL</strong> action, add a header
+        <code>Authorization</code> = <code>Bearer &lt;this token&gt;</code>. Keep it secret — anyone with it can save recipes to your account.</p>
+    </div>
+
+    <a class="btn btn-secondary" id="shortcut-link" href="/shortcut" style="margin-top:16px">iPhone Shortcut setup</a>
+    <button type="button" id="logout" class="btn btn-primary" style="margin-top:12px">Sign out</button>
+  </main>
+
+  <footer>
+    <a class="footer-link" href="/">← Back to Reel Recipes</a>
+  </footer>
+
+  <script src="/account.js?v=8"></script>
+</body>
+</html>

@@ -37,6 +37,19 @@ export async function kvPut(env: Env, key: string, value: string, ttlSeconds: nu
   });
 }
 
+export async function kvDel(env: Env, key: string): Promise<void> {
+  if (env.RECIPES) {
+    await env.RECIPES.delete(key);
+    return;
+  }
+  const upstash = upstashConfig(env);
+  if (!upstash) return;
+  await fetch(`${upstash.url}/del/${encodeURIComponent(key)}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${upstash.token}` },
+  });
+}
+
 function upstashConfig(env: Env): { url: string; token: string } | null {
   const url = (env.UPSTASH_REDIS_REST_URL ?? '').replace(/\/+$/, '');
   const token = env.UPSTASH_REDIS_REST_TOKEN ?? '';

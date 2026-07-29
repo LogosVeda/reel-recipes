@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#faf1ce">
   <title>iPhone Shortcut — Reel Recipes</title>
-  <link rel="stylesheet" href="/styles.css?v=7">
+  <link rel="stylesheet" href="/styles.css?v=8">
 </head>
 <body>
   <header>
@@ -22,6 +22,21 @@
       <p class="sub">On your iPhone: tap the button, open the downloaded file, and tap
         <strong>Add Shortcut</strong>. That's the whole setup — the recipe appears in
         Apple Notes whenever you share a link to <strong>Save Recipe</strong>.</p>
+    </section>
+
+    <section class="card box-optional">
+      <span class="tag">Required · connect your account</span>
+      <h3>Add your personal token</h3>
+      <p>Recipes are private to your account, so the Shortcut has to prove it's you.
+        Open <a class="footer-link" href="/account">your Account page</a>, copy your
+        <strong>Shortcut token</strong>, then in the Shortcut's
+        <strong>Get Contents of URL</strong> action add a <strong>Header</strong>:</p>
+      <ul>
+        <li>Key: <code>Authorization</code></li>
+        <li>Value: <code>Bearer &lt;your token&gt;</code></li>
+      </ul>
+      <p class="sub">Without this header the site replies "Sign in to save recipes"
+        instead of a note. Keep the token secret — anyone with it can save to your account.</p>
     </section>
 
     <details class="manual">
@@ -54,6 +69,8 @@
         <ul>
           <li>URL: <span class="origin">https://this-site</span><code>/api/extract</code></li>
           <li>Method: <code>POST</code></li>
+          <li>Header <code>Authorization</code> = <code>Bearer &lt;your token&gt;</code>
+            (copy the token from <a class="footer-link" href="/account">your Account page</a>)</li>
           <li>Request Body: <code>JSON</code></li>
           <li>Add field <code>url</code> (Text) = <strong>Shortcut Input</strong></li>
         </ul>
