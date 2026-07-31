@@ -85,6 +85,7 @@ Rules:
 - Convert unicode fractions (½ → 0.5) and mixed numbers ("1 1/2" → 1.5) into decimals for qty.
 - If a step mentions a cooking/waiting duration ("bake 25 minutes", "simmer for 10 min", "chill 1 hour"), set minutes to that duration in whole minutes.
 - If the text has no usable recipe (just "recipe in comments!", a product ad, etc.), set is_recipe to false and leave arrays empty.
+- An ingredient list WITHOUT written steps is still a usable recipe (the method is usually shown in the video): set is_recipe to true, extract the ingredients, and leave steps empty rather than rejecting.
 - Write steps as clear numbered-list-ready sentences; split run-on caption text into separate steps.
 - If no title is written, compose a short descriptive one from the dish/ingredients, in the recipe's own language.
 - The title must name the DISH. Never use the creator's account, channel, or brand name as the title — creators often introduce themselves ("welcome back to <brand>") in captions and speech; that is not the dish.
@@ -513,7 +514,9 @@ function normalize(raw: any): LlmRecipeResult {
     : [];
 
   return {
-    isRecipe: Boolean(raw?.is_recipe) && ingredients.length > 0 && steps.length > 0,
+    // Ingredients without written steps IS a usable recipe — reels routinely
+    // put the ingredient list in the caption and show the method on camera.
+    isRecipe: Boolean(raw?.is_recipe) && ingredients.length > 0,
     dishGuess: (() => {
       const d = str(raw?.dish_guess);
       // A model that echoes filler ("null", "n/a", "unknown") gives us nothing.

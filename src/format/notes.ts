@@ -74,8 +74,10 @@ export function buildNoteText(recipe: Recipe, origin: string, factor: number): s
     lines.push(`• ${formatIngredient(ing, factor)}`);
   }
 
+  if (recipe.steps.length > 0) {
   lines.push('');
   lines.push('STEPS');
+  }
   let stepGroup: string | null = null;
   let n = 0;
   for (const step of recipe.steps) {

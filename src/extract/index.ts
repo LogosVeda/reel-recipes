@@ -108,7 +108,7 @@ export async function extractFromUrl(env: Env, input: string): Promise<ExtractRe
     if (fromCover) return fromCover;
     // The post names a dish even though it hides the recipe — find a public
     // recipe for the same dish rather than returning empty-handed.
-    const dish = captionResult.dishGuess ?? null;
+    const dish = captionResult.dishGuess ?? spoken.dish ?? null;
     if (dish) {
       const similar = await findSimilarRecipe(env, dish, url.toString(), PAYWALL_RE.test(text));
       if (similar) return similar;
@@ -127,11 +127,17 @@ export async function extractFromUrl(env: Env, input: string): Promise<ExtractRe
   if (spoken.result) return spoken.result;
   const fromCover = await tryCoverImage(env, content, url.toString());
   if (fromCover) return fromCover;
+  const dish = spoken.dish ?? null;
+  if (dish) {
+    const similar = await findSimilarRecipe(env, dish, url.toString(), PAYWALL_RE.test(text));
+    if (similar) return similar;
+  }
   return {
     ok: false,
     code: 'no_recipe_found',
-    message: noRecipeMessage(platform, text, spoken.audio, true, content.imageUrl !== null),
+    message: noRecipeMessage(platform, text, spoken.audio, true, content.imageUrl !== null, dish),
     fetchedText: text ? text.slice(0, 4000) : undefined,
+    dishGuess: dish ?? undefined,
   };
 }
 
@@ -268,7 +274,7 @@ async function transcribeAndStructure(
   content: { videoUrl: string | null },
   captionText: string,
   ctx: LlmContext,
-): Promise<{ result: ExtractResult | null; audio: AudioOutcome }> {
+): Promise<{ result: ExtractResult | null; audio: AudioOutcome; dish?: string | null }> {
   // Transcription needs either the Workers AI binding or an HTTP Whisper key —
   // without one, say so rather than blaming the platform for withholding video.
   if (!transcriptionAvailable(env)) return { result: null, audio: 'unsupported' };
@@ -283,14 +289,10 @@ async function transcribeAndStructure(
     : `Spoken in the video:\n${transcript}`;
   const result = await structureWithLlm(env, combined, { ...ctx, extractedFrom: 'transcript' });
   if (!result.ok && result.code === 'no_recipe_found') {
-    return {
-      result: {
-        ...result,
-        message: noRecipeMessage(ctx.platform, captionText, 'checked', false),
-        fetchedText: transcript.slice(0, 4000),
-      },
-      audio: 'checked',
-    };
+    // "We listened and there's still no recipe" must NOT end the funnel —
+    // the caller still has the cover scan and the similar-recipe search to
+    // try. Hand back what we learned (the dish, if named) and keep going.
+    return { result: null, audio: 'checked', dish: result.dishGuess ?? null };
   }
   return { result, audio: 'checked' };
 }
@@ -455,7 +457,13 @@ async function structureWithLlm(env: Env, text: string, ctx: LlmContext): Promis
     totalMinutes: result.totalMinutes,
     ingredients: result.ingredients,
     steps: result.steps,
-    notes: [...result.notes, ...(ctx.extraNotes ?? [])],
+    notes: [
+      ...(result.steps.length === 0
+        ? ['The method isn’t written out anywhere — watch the original video for the steps; the ingredient list above is complete.']
+        : []),
+      ...result.notes,
+      ...(ctx.extraNotes ?? []),
+    ],
     extractedFrom: ctx.extractedFrom,
     confidence: text.length > 400 ? 'medium' : 'low',
     createdAt: new Date().toISOString(),

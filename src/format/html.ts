@@ -277,8 +277,7 @@ ${scaleControl(recipe, factor, idPath)}
 ${languageSelector(recipe, idPath, fp, opts)}
 <h2>Ingredients</h2>
 ${checklist(recipe, factor, 'ing')}
-<h2>Steps</h2>
-${stepsOut.join('\n')}
+${recipe.steps.length > 0 ? `<h2>Steps</h2>\n${stepsOut.join('\n')}` : ''}
 ${notes}
 <div class="actions">
 <a class="btn primary" href="${esc(idPath)}/list?x=${fp}">Shopping list</a>
