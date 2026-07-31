@@ -37,7 +37,7 @@ export async function extractFromUrl(env: Env, input: string): Promise<ExtractRe
   }
 
   const platform = detectPlatform(url.toString());
-  const content = await fetchContent(url.toString());
+  const content = await fetchContent(url.toString(), env);
 
   if (!content) {
     return {
@@ -127,7 +127,19 @@ export async function extractFromUrl(env: Env, input: string): Promise<ExtractRe
   if (spoken.result) return spoken.result;
   const fromCover = await tryCoverImage(env, content, url.toString());
   if (fromCover) return fromCover;
-  const dish = spoken.dish ?? null;
+  let dish = spoken.dish ?? null;
+  if (!dish && content.title && llmAvailable(env)) {
+    // Even a bare title usually names the dish ("How French Restaurants
+    // Make Tarte Tatin") — one cheap pass to seed the similar-recipe search.
+    try {
+      const seed = await structureWithLlm(
+        env,
+        `Video title: "${content.title}". This text is only the video's title — it contains no recipe itself. What dish is the video about?`,
+        ctx,
+      );
+      if (!seed.ok && seed.code === 'no_recipe_found') dish = seed.dishGuess ?? null;
+    } catch { /* the seed is best-effort */ }
+  }
   if (dish) {
     const similar = await findSimilarRecipe(env, dish, url.toString(), PAYWALL_RE.test(text));
     if (similar) return similar;
@@ -154,8 +166,15 @@ async function findSimilarRecipe(
   originalUrl: string,
   paywalled: boolean,
 ): Promise<ExtractResult | null> {
-  const urls = await searchWeb(`${dish} recipe`);
-  for (const candidate of urls.slice(0, 3)) {
+  const hits = await searchWeb(dish);
+  let fetches = 0;
+  for (const hit of hits) {
+    if (fetches >= 3) break;
+    // A titled hit that shares no word with the dish isn't worth a fetch —
+    // WordPress search returns its best fuzzy guess for anything.
+    if (hit.title && !titlesPlausiblyMatch(dish, hit.title)) continue;
+    const candidate = hit.url;
+    fetches++;
     try {
       const content = await fetchContent(candidate);
       if (!content?.html) continue;

@@ -21,7 +21,14 @@ const SKIP_HOSTS =
 // WordPress recipe blogs whose REST search answered from a datacenter IP
 // (probed 2026-07). Grouped by language; unknown languages use the EN pool.
 const WP_POOLS: Record<string, string[]> = {
-  en: ['www.budgetbytes.com', 'sallysbakingaddiction.com', 'www.cookieandkate.com'],
+  en: [
+    'www.budgetbytes.com',
+    'smittenkitchen.com',
+    'sallysbakingaddiction.com',
+    'www.onceuponachef.com',
+    'www.loveandlemons.com',
+    'www.cookieandkate.com',
+  ],
   pl: ['www.mojewypieki.com'],
 };
 
@@ -73,7 +80,14 @@ async function duckDuckGo(query: string): Promise<string[]> {
   }
 }
 
-async function wordPressSearch(host: string, query: string): Promise<string[]> {
+export interface SearchHit {
+  url: string;
+  /** Result title when the source provides one — lets callers skip obvious
+   * non-matches without spending a page fetch. */
+  title: string | null;
+}
+
+async function wordPressSearch(host: string, query: string): Promise<SearchHit[]> {
   try {
     const res = await fetch(
       `https://${host}/wp-json/wp/v2/search?search=${encodeURIComponent(query)}&per_page=2&subtype=post`,
@@ -84,11 +98,14 @@ async function wordPressSearch(host: string, query: string): Promise<string[]> {
       },
     );
     if (!res.ok) return [];
-    const items = (await res.json()) as Array<{ url?: string }>;
+    const items = (await res.json()) as Array<{ url?: string; title?: string }>;
     if (!Array.isArray(items)) return [];
     return items
-      .map((i) => (typeof i.url === 'string' ? i.url : ''))
-      .filter((u) => /^https:\/\//.test(u) && validateUrl(u));
+      .filter((i) => typeof i.url === 'string' && /^https:\/\//.test(i.url) && validateUrl(i.url))
+      .map((i) => ({
+        url: i.url as string,
+        title: typeof i.title === 'string' ? i.title.replace(/&(nbsp|#160);/g, ' ').replace(/&amp;/g, '&').trim() : null,
+      }));
   } catch {
     return [];
   }
@@ -122,12 +139,12 @@ export function titlesPlausiblyMatch(dish: string, foundTitle: string): boolean 
 }
 
 /**
- * Candidate recipe-page URLs for a dish, best sources first. Never throws;
+ * Candidate recipe pages for a dish, best sources first. Never throws;
  * [] when every strategy comes up dry.
  */
-export async function searchWeb(dish: string): Promise<string[]> {
+export async function searchWeb(dish: string): Promise<SearchHit[]> {
   const ddg = await duckDuckGo(`${dish} recipe`);
-  if (ddg.length > 0) return ddg;
+  if (ddg.length > 0) return ddg.map((url) => ({ url, title: null }));
   const pool = poolFor(dish);
   const perSite = await Promise.all(pool.map((host) => wordPressSearch(host, dish)));
   return perSite.flat();

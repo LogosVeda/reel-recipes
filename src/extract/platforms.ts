@@ -217,13 +217,13 @@ function asString(v: unknown): string | null {
   return typeof v === 'string' && v.length > 0 ? v : null;
 }
 
-export async function fetchContent(url: string): Promise<FetchedContent | null> {
+export async function fetchContent(url: string, env?: { YOUTUBE_API_KEY?: string }): Promise<FetchedContent | null> {
   const platform = detectPlatform(url);
   switch (platform) {
     case 'tiktok':
       return fetchTikTok(url);
     case 'youtube':
-      return fetchYouTube(url);
+      return fetchYouTube(url, env?.YOUTUBE_API_KEY);
     case 'instagram':
       return fetchInstagramOrFacebook(url, 'instagram');
     case 'facebook':
@@ -276,28 +276,64 @@ function extractYouTubeDescription(html: string): string | null {
   }
 }
 
-async function fetchYouTube(url: string): Promise<FetchedContent | null> {
+/** Video id from watch?v=, youtu.be/, shorts/ and live/ URL shapes. */
+export function youTubeVideoId(url: string): string | null {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.replace(/^(www|m)\./, '');
+    if (host === 'youtu.be') return u.pathname.slice(1).split('/')[0] || null;
+    const v = u.searchParams.get('v');
+    if (v) return v;
+    const m = /^\/(shorts|live|embed)\/([A-Za-z0-9_-]{6,})/.exec(u.pathname);
+    return m ? m[2]! : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchYouTube(url: string, apiKey?: string): Promise<FetchedContent | null> {
   const oembed = await fetchJson(
     'https://www.youtube.com/oembed?url=' + encodeURIComponent(url) + '&format=json'
   );
   let title = asString(oembed?.['title']);
   let author = asString(oembed?.['author_name']);
+  let description = '';
+  let imageUrl: string | null = null;
 
+  // The watch page (and Innertube) are bot-walled from datacenter IPs
+  // (429 → google.com/sorry, verified 2026-07). The official Data API is the
+  // reliable way to the full description — free key, 10k requests/day.
+  const videoId = youTubeVideoId(url);
+  if (apiKey && videoId) {
+    const data = await fetchJson(
+      `https://www.googleapis.com/youtube/v3/videos?part=snippet&id=${encodeURIComponent(videoId)}&key=${encodeURIComponent(apiKey)}`
+    );
+    const snippet = (data?.['items'] as Array<{ snippet?: Record<string, unknown> }> | undefined)?.[0]?.snippet;
+    if (snippet) {
+      description = asString(snippet['description']) ?? '';
+      title = asString(snippet['title']) ?? title;
+      author = asString(snippet['channelTitle']) ?? author;
+      const thumbs = snippet['thumbnails'] as Record<string, { url?: string }> | undefined;
+      imageUrl = thumbs?.['maxres']?.url ?? thumbs?.['high']?.url ?? null;
+    }
+  }
+
+  // Try the page anyway — it works from residential IPs (local dev) and, when
+  // it answers, may carry more than the API (or fill in for a missing key).
   const page = await fetchPage(url);
   const html = page && page.ok ? page.text : null;
-
-  let description = '';
   if (html) {
-    description = extractYouTubeDescription(html) ?? '';
+    if (!description) description = extractYouTubeDescription(html) ?? '';
     const meta = extractMeta(html);
     if (!description && meta.ogDescription) description = meta.ogDescription;
     if (!title) title = meta.ogTitle ?? meta.title;
     if (!author) author = meta.author;
+    if (!imageUrl) imageUrl = meta.ogImage;
   }
 
   if (!title && !description) return null;
   const text = title && description ? title + '\n\n' + description : (title ?? description);
-  return { platform: 'youtube', text, title, author, siteName: 'YouTube', html, videoUrl: html ? extractMeta(html).ogVideo : null, imageUrl: html ? extractMeta(html).ogImage : null, truncated: false };
+  return { platform: 'youtube', text, title, author, siteName: 'YouTube', html, videoUrl: html ? extractMeta(html).ogVideo : null, imageUrl, truncated: false };
 }
 
 async function fetchInstagramOrFacebook(

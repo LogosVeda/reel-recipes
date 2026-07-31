@@ -108,6 +108,9 @@ export interface Env {
   // Vercel (or any host without Cloudflare KV): Upstash Redis REST credentials.
   UPSTASH_REDIS_REST_URL?: string;
   UPSTASH_REDIS_REST_TOKEN?: string;
+  // Official YouTube Data API v3 key (free) — the only reliable way to full
+  // video descriptions from a datacenter IP; YouTube bot-walls everything else.
+  YOUTUBE_API_KEY?: string;
   // Speech-to-text for hosts without the Workers AI binding. Any
   // OpenAI-compatible /audio/transcriptions endpoint (Groq, OpenAI).
   WHISPER_API_KEY?: string;
