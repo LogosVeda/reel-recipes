@@ -6,6 +6,7 @@ import { extractFromImage, extractFromPaste, extractFromUrl } from './extract/in
 import { buildNoteText } from './format/notes.js';
 import { renderRecipePage, renderShoppingListPage } from './format/html.js';
 import { getRecipe, getRecipeInLang } from './store.js';
+import { kvGet, kvPut } from './kv.js';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -54,11 +55,78 @@ app.get('/', async (c) => {
   return c.html(homeMissingPage(), 500);
 });
 
+// --- abuse guard ---------------------------------------------------------
+// Extraction is the only expensive route (LLM + transcription per call).
+// Free-tier reality check (all measured, not assumed): Cloudflare's ratelimit
+// binding silently never limits on workers.dev, the Cache API is a no-op
+// there, and per-isolate memory misses most requests because bursts spawn
+// fresh isolates. So two honest layers:
+//   1. per-IP in-memory window — catches same-isolate bursts only;
+//   2. a GLOBAL budget breaker in KV — sampled writes (fits the 1k/day free
+//      write quota), estimates total extraction volume per 10-minute window
+//      and closes the API when it exceeds what a legitimate crowd could do.
+// The real production fix is a custom domain + a WAF rate rule (see README).
+const RATE_WINDOW_MS = 5 * 60 * 1000;
+const RATE_MAX_CALLS = 12; // a human pasting links stays far under this
+const rateLog = new Map<string, number[]>();
+
+function rateLimited(ip: string): boolean {
+  const now = Date.now();
+  const log = (rateLog.get(ip) ?? []).filter((t) => now - t < RATE_WINDOW_MS);
+  if (log.length >= RATE_MAX_CALLS) {
+    rateLog.set(ip, log);
+    return true;
+  }
+  log.push(now);
+  rateLog.set(ip, log);
+  // Cap total memory: drop the oldest entries when the map grows too large.
+  if (rateLog.size > 5000) {
+    const first = rateLog.keys().next().value;
+    if (first !== undefined) rateLog.delete(first);
+  }
+  return false;
+}
+
+const BREAKER_WINDOW_MS = 10 * 60 * 1000;
+const BREAKER_SAMPLE_P = 0.2; // 1 KV write per ~5 extractions
+const BREAKER_MAX_ESTIMATE = 120; // est. extractions/10min before closing
+
+async function globallyOverloaded(env: Env): Promise<boolean> {
+  const bucket = Math.floor(Date.now() / BREAKER_WINDOW_MS);
+  const key = `rl:global:${bucket}`;
+  try {
+    const stored = Number((await kvGet(env, key)) ?? '0') || 0;
+    const estimate = stored / BREAKER_SAMPLE_P;
+    if (estimate >= BREAKER_MAX_ESTIMATE) return true;
+    if (Math.random() < BREAKER_SAMPLE_P) {
+      await kvPut(env, key, String(stored + 1), 30 * 60);
+    }
+    return false;
+  } catch {
+    // KV failing usually means the write quota is gone — the day's budget is
+    // spent, so fail closed rather than run the AI bill uncounted.
+    return true;
+  }
+}
+
 // --- API ---------------------------------------------------------------
 
 // Main entry point, used by both the web UI and the iOS Shortcut.
 // Body: { url?: string, text?: string, image?: base64 string, servings?: number }
 app.post('/api/extract', async (c) => {
+  const ip = c.req.header('cf-connecting-ip') ?? c.req.header('x-forwarded-for') ?? 'unknown';
+  if (rateLimited(ip)) {
+    return c.json(
+      { ok: false, code: 'rate_limited', message: 'That’s a lot of recipes at once — give it a minute and try again.' },
+      429,
+    );
+  }
+  if (await globallyOverloaded(c.env)) {
+    return c.json(
+      { ok: false, code: 'rate_limited', message: 'The kitchen is at full capacity right now — please try again in a little while.' },
+      429,
+    );
+  }
   let body: { url?: string; text?: string; image?: string; servings?: number };
   try {
     body = await c.req.json();

@@ -124,6 +124,30 @@ Error codes from `/api/extract`: `invalid_url`, `fetch_blocked` (site refused th
 fetch — paste the caption instead), `no_recipe_found` (no recipe in the text),
 `llm_unavailable` (no AI backend configured).
 
+## Before opening this to real users
+
+The app runs unauthenticated, so the costs of every extraction land on the
+operator. Current guardrails and their honest limits:
+
+- **Rate limiting**: two best-effort layers on `POST /api/extract` — a per-IP
+  in-memory window, and a global budget breaker (KV-sampled estimate of total
+  volume; the API closes for a 10-minute window when traffic exceeds what real
+  users would produce, and fails closed if the KV write quota is exhausted).
+  Measured caveat: on free workers.dev domains, Cloudflare's ratelimit binding
+  and Cache API are silent no-ops, and per-isolate memory misses most bursts —
+  so **the production fix is a custom domain** (a few $/yr on Cloudflare
+  Registrar), which unlocks a real WAF rate-limiting rule for this route.
+- **Free-tier ceilings** (Cloudflare): Workers AI has a daily free allocation
+  (LLM + Whisper + vision all draw from it), and KV allows ~1k writes/day —
+  each saved recipe plus each cached translation is a write. A few hundred
+  recipes/day fits; beyond that needs the $5/mo Workers Paid plan.
+- **If you set ANTHROPIC_API_KEY**: every stranger's extraction bills your
+  Anthropic account. Set a monthly spend cap in the Anthropic console before
+  sharing the link publicly.
+- **No accounts**: recipes live at unguessable private links with a 1-year
+  TTL; there is nothing personal stored. Add a privacy note to the footer if
+  you distribute this beyond friends.
+
 ## Known limitations
 
 - **Transcription needs the page to publish og:video.** Most public FB/IG reels
