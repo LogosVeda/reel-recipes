@@ -13,6 +13,11 @@ const RECIPE_SCHEMA = {
       type: 'boolean',
       description: 'false when the text contains no usable recipe at all',
     },
+    dish_guess: {
+      type: ['string', 'null'],
+      description:
+        'ONLY meaningful when is_recipe is false: the name of the dish being shown or discussed (e.g. "chicken pastina soup"), in the language of the text, when one is clearly identifiable; null otherwise.',
+    },
     title: {
       type: 'string',
       description: 'The dish name. If none is written, compose a short descriptive title from the main ingredients, in the recipe\'s own language — never "Untitled".',
@@ -65,7 +70,7 @@ const RECIPE_SCHEMA = {
     notes: { type: 'array', items: { type: 'string' } },
   },
   required: [
-    'is_recipe', 'title', 'language', 'description', 'servings', 'prep_minutes',
+    'is_recipe', 'dish_guess', 'title', 'language', 'description', 'servings', 'prep_minutes',
     'cook_minutes', 'total_minutes', 'ingredients', 'steps', 'notes',
   ],
   additionalProperties: false,
@@ -82,6 +87,7 @@ Rules:
 - If the text has no usable recipe (just "recipe in comments!", a product ad, etc.), set is_recipe to false and leave arrays empty.
 - Write steps as clear numbered-list-ready sentences; split run-on caption text into separate steps.
 - If no title is written, compose a short descriptive one from the dish/ingredients, in the recipe's own language.
+- The title must name the DISH. Never use the creator's account, channel, or brand name as the title — creators often introduce themselves ("welcome back to <brand>") in captions and speech; that is not the dish.
 - Keep the recipe's original language; do not translate.`;
 
 const TRANSCRIPT_NOTE =
@@ -89,6 +95,8 @@ const TRANSCRIPT_NOTE =
 
 export interface LlmRecipeResult {
   isRecipe: boolean;
+  /** When isRecipe is false: the dish the post is about, if identifiable. */
+  dishGuess: string | null;
   title: string;
   language: string | null;
   description: string | null;
@@ -506,6 +514,11 @@ function normalize(raw: any): LlmRecipeResult {
 
   return {
     isRecipe: Boolean(raw?.is_recipe) && ingredients.length > 0 && steps.length > 0,
+    dishGuess: (() => {
+      const d = str(raw?.dish_guess);
+      // A model that echoes filler ("null", "n/a", "unknown") gives us nothing.
+      return d && d.length >= 3 && !/^(null|none|n\/a|unknown|not specified)$/i.test(d) ? d : null;
+    })(),
     title: str(raw?.title) ?? 'Untitled recipe',
     language: (() => {
       const l = str(raw?.language)?.toLowerCase() ?? null;

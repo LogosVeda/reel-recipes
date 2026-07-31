@@ -91,6 +91,8 @@ export type ExtractResult =
       message: string;
       /** Whatever text we did manage to fetch, offered back for the paste-fallback flow */
       fetchedText?: string;
+      /** The dish the post is about, when identifiable despite having no recipe */
+      dishGuess?: string;
     };
 
 export interface Env {

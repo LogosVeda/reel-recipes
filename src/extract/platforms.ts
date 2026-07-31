@@ -1,7 +1,7 @@
 // Platform detection and network adapters. Runs on Cloudflare Workers (fetch only).
 
 import type { FetchedContent, Platform } from '../types.js';
-import { extractMeta, htmlToText, looksTruncated, stripFacebookTitleSuffix, unwrapInstagramDescription } from './html.js';
+import { extractMeta, htmlToText, looksTruncated, stripFacebookTitleSuffix, stripInstagramTitlePrefix, unwrapInstagramDescription } from './html.js';
 import { validateUrl } from './url.js';
 
 export function detectPlatform(url: string): Platform {
@@ -312,7 +312,9 @@ async function fetchInstagramOrFacebook(
   const rawDescription = meta.ogDescription ?? '';
   const fromDescription = unwrapInstagramDescription(rawDescription);
   // FB's og:title usually carries ~4x more of the caption than og:description.
-  const fromTitle = meta.ogTitle ? stripFacebookTitleSuffix(meta.ogTitle) : '';
+  // Both wrappers are platform-specific and mutually exclusive, so applying
+  // the pair is safe regardless of which platform this post came from.
+  const fromTitle = meta.ogTitle ? stripInstagramTitlePrefix(stripFacebookTitleSuffix(meta.ogTitle)) : '';
   const caption = fromTitle.length > fromDescription.length ? fromTitle : fromDescription;
   // og:description ending in an ellipsis is FB's own truncation marker; a
   // title-sourced caption that ends mid-word (no closing punctuation) is the

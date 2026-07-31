@@ -7,6 +7,7 @@ import { validateUrl } from './url.js';
 import { bytesToBase64, llmAvailable, sniffImageType, structureRecipeImage, structureRecipeText, transcribeAudio, transcriptionAvailable } from '../llm.js';
 import { detectMinutes, parseIngredientLine } from '../scale.js';
 import { newRecipeId, saveRecipe } from '../store.js';
+import { searchWeb, titlesPlausiblyMatch } from './search.js';
 
 export { validateUrl };
 
@@ -105,11 +106,19 @@ export async function extractFromUrl(env: Env, input: string): Promise<ExtractRe
     if (captionResult.code !== 'no_recipe_found') return captionResult;
     const fromCover = await tryCoverImage(env, content, url.toString());
     if (fromCover) return fromCover;
+    // The post names a dish even though it hides the recipe — find a public
+    // recipe for the same dish rather than returning empty-handed.
+    const dish = captionResult.dishGuess ?? null;
+    if (dish) {
+      const similar = await findSimilarRecipe(env, dish, url.toString(), PAYWALL_RE.test(text));
+      if (similar) return similar;
+    }
     return {
       ok: false,
       code: 'no_recipe_found',
-      message: noRecipeMessage(platform, text, spoken.audio, false, content.imageUrl !== null),
+      message: noRecipeMessage(platform, text, spoken.audio, false, content.imageUrl !== null, dish),
       fetchedText: text.slice(0, 4000),
+      dishGuess: dish ?? undefined,
     };
   }
 
@@ -124,6 +133,61 @@ export async function extractFromUrl(env: Env, input: string): Promise<ExtractRe
     message: noRecipeMessage(platform, text, spoken.audio, true, content.imageUrl !== null),
     fetchedText: text ? text.slice(0, 4000) : undefined,
   };
+}
+
+/**
+ * The creator hid the recipe but named the dish — search the public web for
+ * the same dish and extract the best structured match. Strictly JSON-LD:
+ * only pages with real schema.org/Recipe data qualify, so a "similar recipe"
+ * is always a complete, real one. The result is labeled honestly in its
+ * notes: where it came from, and that it is NOT the creator's own version.
+ */
+async function findSimilarRecipe(
+  env: Env,
+  dish: string,
+  originalUrl: string,
+  paywalled: boolean,
+): Promise<ExtractResult | null> {
+  const urls = await searchWeb(`${dish} recipe`);
+  for (const candidate of urls.slice(0, 3)) {
+    try {
+      const content = await fetchContent(candidate);
+      if (!content?.html) continue;
+      const jsonld = extractJsonLdRecipe(content.html);
+      if (!jsonld || jsonld.ingredientLines.length === 0 || jsonld.steps.length === 0) continue;
+      // Fuzzy site search can return its best wrong guess — demand at least
+      // one substantive word in common between dish and found recipe.
+      if (jsonld.title && !titlesPlausiblyMatch(dish, jsonld.title)) continue;
+      const host = new URL(candidate).hostname.replace(/^www\./, '');
+      const recipe = assembleRecipe(env, {
+        title: jsonld.title || content.title || dish,
+        description: jsonld.description,
+        servings: jsonld.servings,
+        prepMinutes: jsonld.prepMinutes,
+        cookMinutes: jsonld.cookMinutes,
+        totalMinutes: jsonld.totalMinutes,
+        ingredientLines: jsonld.ingredientLines,
+        steps: jsonld.steps,
+        notes: [
+          paywalled
+            ? `The creator of the video keeps their exact recipe behind a subscription, so this is a similar ${dish} recipe from ${host} — not the creator's own version.`
+            : `The video didn't include its recipe, so this is a similar ${dish} recipe from ${host}.`,
+          `Original video: ${originalUrl}`,
+        ],
+        url: candidate,
+        platform: 'web',
+        author: jsonld.author ?? content.author,
+        siteName: jsonld.siteName ?? content.siteName ?? host,
+        extractedFrom: 'jsonld',
+        confidence: 'medium',
+      });
+      await saveRecipe(env, recipe);
+      return { ok: true, recipe };
+    } catch {
+      continue; // a broken candidate must never sink the whole request
+    }
+  }
+  return null;
 }
 
 /**
@@ -156,9 +220,10 @@ const PAYWALL_RE =
  * the caption points at the creator's own website, route the user there —
  * recipe sites are the one input that extracts perfectly.
  */
-function noRecipeMessage(platform: Platform, caption: string, audio: AudioOutcome, thinCaption: boolean, coverChecked = false): string {
+function noRecipeMessage(platform: Platform, caption: string, audio: AudioOutcome, thinCaption: boolean, coverChecked = false, dish: string | null = null): string {
   const name = platformName(platform);
   const parts: string[] = [];
+  if (dish) parts.push(`This looks like ${dish}.`);
   parts.push(
     thinCaption
       ? `This ${name} post has no written description to read.`
@@ -180,7 +245,9 @@ function noRecipeMessage(platform: Platform, caption: string, audio: AudioOutcom
   }
   if (!thinCaption && PAYWALL_RE.test(caption)) {
     parts.push(
-      'The caption says the full recipe lives on the creator’s own website — if you can open it there, paste that page’s link here instead; recipe sites extract perfectly. Otherwise screenshot the recipe wherever you can see it and use the screenshots option.'
+      dish
+        ? `The creator keeps the written recipe behind their newsletter/subscription, and no public ${dish} recipe could be verified just now. If you can open theirs, paste that page’s link here — recipe sites extract perfectly. Otherwise screenshot the recipe wherever you can see it and use the screenshots option.`
+        : 'The caption says the full recipe lives on the creator’s own website — if you can open it there, paste that page’s link here instead; recipe sites extract perfectly. Otherwise screenshot the recipe wherever you can see it and use the screenshots option.'
     );
   } else {
     parts.push(
@@ -367,6 +434,7 @@ async function structureWithLlm(env: Env, text: string, ctx: LlmContext): Promis
           ? "That text doesn't seem to contain a recipe. Paste the whole thing — ingredients with quantities and the steps."
           : `The text on this ${platformName(ctx.platform)} page doesn't contain the recipe itself.`,
       fetchedText: text.slice(0, 4000),
+      dishGuess: result.dishGuess ?? undefined,
     };
   }
 

@@ -3,8 +3,10 @@ import {
   decodeEntities,
   extractMeta,
   htmlToText,
+  stripInstagramTitlePrefix,
   unwrapInstagramDescription,
 } from '../src/extract/html';
+import { parseDuckDuckGoResults, titlesPlausiblyMatch } from '../src/extract/search';
 
 describe('decodeEntities', () => {
   it('decodes named entities', () => {
@@ -138,6 +140,54 @@ describe('htmlToText', () => {
   it('respects maxLen', () => {
     const html = '<p>' + 'x'.repeat(500) + '</p>';
     expect(htmlToText(html, 100)).toHaveLength(100);
+  });
+});
+
+describe('stripInstagramTitlePrefix', () => {
+  it('drops the "Account | Name on Instagram:" wrapper and keeps the caption', () => {
+    const s = 'Buchta z Masłem | Marianna on Instagram: "Jagody w polskiej kuchni najczęściej kojarzymy z pierogami."';
+    expect(stripInstagramTitlePrefix(s)).toBe('Jagody w polskiej kuchni najczęściej kojarzymy z pierogami.');
+  });
+
+  it('keeps a truncated caption that never closed its quote', () => {
+    const s = 'Delaney & Shelby on Instagram: "We clearly are on a pastina kick (but who';
+    expect(stripInstagramTitlePrefix(s)).toBe('We clearly are on a pastina kick (but who');
+  });
+
+  it('returns non-Instagram titles unchanged', () => {
+    expect(stripInstagramTitlePrefix('Perfect Carbonara | RecipeTin Eats')).toBe('Perfect Carbonara | RecipeTin Eats');
+  });
+});
+
+describe('parseDuckDuckGoResults', () => {
+  const page = `
+    <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.seriouseats.com%2Fpastina-soup&rut=abc">Pastina</a>
+    <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3Dxyz&rut=def">Video</a>
+    <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.seriouseats.com%2Fother&rut=ghi">Dup host</a>
+    <a class="result__a" href="//duckduckgo.com/l/?uddg=http%3A%2F%2Finsecure.example%2Fx&rut=jkl">http only</a>
+    <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fbudgetbytes.com%2Fpastina%2F&rut=mno">BB</a>`;
+
+  it('decodes uddg targets, skips video/social hosts, dedupes hosts, https only', () => {
+    expect(parseDuckDuckGoResults(page)).toEqual([
+      'https://www.seriouseats.com/pastina-soup',
+      'https://budgetbytes.com/pastina/',
+    ]);
+  });
+
+  it('returns [] on markup it does not recognize', () => {
+    expect(parseDuckDuckGoResults('<html><body>No results wrapper here</body></html>')).toEqual([]);
+  });
+});
+
+describe('titlesPlausiblyMatch', () => {
+  it('accepts a shared substantive word', () => {
+    expect(titlesPlausiblyMatch('chicken pastina soup', 'Italian Wedding Soup')).toBe(true);
+  });
+  it('rejects unrelated dishes', () => {
+    expect(titlesPlausiblyMatch('chłodnik jagodowy', 'Banana Bread')).toBe(false);
+  });
+  it('folds diacritics so Polish matches survive', () => {
+    expect(titlesPlausiblyMatch('chłodnik jagodowy', 'Chlodnik jagodowy z kluskami')).toBe(true);
   });
 });
 

@@ -168,6 +168,17 @@ export function unwrapInstagramDescription(s: string): string {
  * Facebook og:title carries far more of a reel's caption (~780 chars) than
  * og:description (~200), but may end with " | Page Name | Facebook" — strip it.
  */
+/**
+ * Instagram og:title wraps the caption as:
+ *   Account | Display Name on Instagram: "caption text"
+ * Left unstripped, models regularly crown the recipe with the ACCOUNT name
+ * ("Buchta z Masłem") instead of the dish. Strip the wrapper, keep the caption.
+ */
+export function stripInstagramTitlePrefix(s: string): string {
+  const m = /^[^"”«]{0,160}\bon Instagram\s*:\s*["“]?([\s\S]*?)["”]?\s*$/.exec(s.trim());
+  return m ? m[1]!.trim() : s.trim();
+}
+
 export function stripFacebookTitleSuffix(s: string): string {
   return s
     .replace(/\s*\|\s*[^|]{0,120}\|\s*Facebook\s*$/, '')
