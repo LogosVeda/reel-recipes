@@ -7,6 +7,7 @@ import {
   unwrapInstagramDescription,
 } from '../src/extract/html';
 import { parseDuckDuckGoResults, titlesPlausiblyMatch } from '../src/extract/search';
+import { parseTranscriptPayload } from '../src/extract/platforms';
 
 describe('decodeEntities', () => {
   it('decodes named entities', () => {
@@ -176,6 +177,20 @@ describe('parseDuckDuckGoResults', () => {
 
   it('returns [] on markup it does not recognize', () => {
     expect(parseDuckDuckGoResults('<html><body>No results wrapper here</body></html>')).toEqual([]);
+  });
+});
+
+describe('parseTranscriptPayload', () => {
+  it('reads tracks[].transcript[].text', () => {
+    expect(parseTranscriptPayload([{ id: 'x', tracks: [{ language: 'en', transcript: [{ text: 'Peel the' }, { text: 'apples.' }] }] }]))
+      .toBe('Peel the apples.');
+  });
+  it('reads a bare transcript array of strings', () => {
+    expect(parseTranscriptPayload({ transcript: ['Caramel', 'in the pan'] })).toBe('Caramel in the pan');
+  });
+  it('returns null on shapes it does not recognize', () => {
+    expect(parseTranscriptPayload({ nothing: true })).toBeNull();
+    expect(parseTranscriptPayload([])).toBeNull();
   });
 });
 

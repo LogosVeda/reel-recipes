@@ -199,6 +199,67 @@ export async function fetchImageBytes(url: string): Promise<Uint8Array | null> {
   }
 }
 
+/**
+ * Pull plain transcript text out of a youtube-transcript.io response. Their
+ * payload shape isn't formally documented, so accept every plausible layout
+ * (tracks[].transcript[].text, transcript[] directly, or a plain string) and
+ * return null rather than guessing when none matches.
+ */
+export function parseTranscriptPayload(data: unknown): string | null {
+  const joinSegments = (segs: unknown): string | null => {
+    if (typeof segs === 'string') return segs.trim() || null;
+    if (!Array.isArray(segs)) return null;
+    const parts = segs
+      .map((s) => (typeof s === 'string' ? s : typeof (s as { text?: unknown })?.text === 'string' ? (s as { text: string }).text : ''))
+      .filter(Boolean);
+    return parts.length > 0 ? parts.join(' ').replace(/\s+/g, ' ').trim() : null;
+  };
+
+  const fromItem = (item: unknown): string | null => {
+    if (!item || typeof item !== 'object') return null;
+    const it = item as Record<string, unknown>;
+    const tracks = it['tracks'];
+    if (Array.isArray(tracks)) {
+      for (const track of tracks) {
+        const t = joinSegments((track as Record<string, unknown>)?.['transcript']);
+        if (t) return t;
+      }
+    }
+    return joinSegments(it['transcript']) ?? joinSegments(it['text']);
+  };
+
+  if (Array.isArray(data)) {
+    for (const item of data) {
+      const t = fromItem(item);
+      if (t) return t;
+    }
+    return null;
+  }
+  return fromItem(data);
+}
+
+/** Spoken words of a YouTube video via youtube-transcript.io (paid API). */
+export async function fetchYouTubeTranscript(apiToken: string, videoId: string): Promise<string | null> {
+  try {
+    const res = await fetch('https://www.youtube-transcript.io/api/transcripts', {
+      method: 'POST',
+      headers: {
+        Authorization: `Basic ${apiToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ ids: [videoId] }),
+      signal: AbortSignal.timeout(30000),
+    });
+    if (!res.ok) return null;
+    const transcript = parseTranscriptPayload(await res.json());
+    if (!transcript) return null;
+    // Keep prompts inside the fallback model's context window.
+    return transcript.length > 9000 ? transcript.slice(0, 9000) : transcript;
+  } catch {
+    return null;
+  }
+}
+
 async function fetchJson(url: string): Promise<Record<string, unknown> | null> {
   const page = await fetchPage(url);
   if (!page || !page.ok) return null;

@@ -2,7 +2,7 @@
 // site provides it, otherwise caption/description text → LLM structuring.
 import type { Env, ExtractResult, Ingredient, Platform, Recipe, Step } from '../types.js';
 import { extractJsonLdRecipe } from './jsonld.js';
-import { detectPlatform, fetchContent, fetchImageBytes, fetchVideoBytes } from './platforms.js';
+import { detectPlatform, fetchContent, fetchImageBytes, fetchVideoBytes, fetchYouTubeTranscript, youTubeVideoId } from './platforms.js';
 import { validateUrl } from './url.js';
 import { bytesToBase64, llmAvailable, sniffImageType, structureRecipeImage, structureRecipeText, transcribeAudio, transcriptionAvailable } from '../llm.js';
 import { detectMinutes, parseIngredientLine } from '../scale.js';
@@ -98,17 +98,27 @@ export async function extractFromUrl(env: Env, input: string): Promise<ExtractRe
       if (merged.result?.ok) return merged.result;
     }
     const captionResult = await structureWithLlm(env, text, ctx);
-    if (captionResult.ok) return captionResult;
+    if (captionResult.ok) {
+      // "More informed" pass: a caption that gave ingredients but no method
+      // can be completed by the video's spoken words (YouTube transcript API).
+      if (captionResult.recipe.steps.length === 0) {
+        const enriched = await youTubeTranscriptAndStructure(env, url.toString(), text, ctx);
+        if (enriched.result?.ok && enriched.result.recipe.steps.length > 0) return enriched.result;
+      }
+      return captionResult;
+    }
     // Caption didn't yield a recipe (teaser text, or even a flaky model reply) —
     // listen to the video before giving up.
     const spoken = await transcribeAndStructure(env, content, text, ctx);
     if (spoken.result) return spoken.result;
+    const ytSpoken = await youTubeTranscriptAndStructure(env, url.toString(), text, ctx);
+    if (ytSpoken.result) return ytSpoken.result;
     if (captionResult.code !== 'no_recipe_found') return captionResult;
     const fromCover = await tryCoverImage(env, content, url.toString());
     if (fromCover) return fromCover;
     // The post names a dish even though it hides the recipe — find a public
     // recipe for the same dish rather than returning empty-handed.
-    const dish = captionResult.dishGuess ?? spoken.dish ?? null;
+    const dish = captionResult.dishGuess ?? spoken.dish ?? ytSpoken.dish ?? null;
     if (dish) {
       const similar = await findSimilarRecipe(env, dish, url.toString(), PAYWALL_RE.test(text));
       if (similar) return similar;
@@ -116,7 +126,7 @@ export async function extractFromUrl(env: Env, input: string): Promise<ExtractRe
     return {
       ok: false,
       code: 'no_recipe_found',
-      message: noRecipeMessage(platform, text, spoken.audio, false, content.imageUrl !== null, dish),
+      message: noRecipeMessage(platform, text, ytSpoken.audio ?? spoken.audio, false, content.imageUrl !== null, dish),
       fetchedText: text.slice(0, 4000),
       dishGuess: dish ?? undefined,
     };
@@ -125,9 +135,11 @@ export async function extractFromUrl(env: Env, input: string): Promise<ExtractRe
   // Thin or missing caption: the video may still speak the recipe.
   const spoken = await transcribeAndStructure(env, content, text, ctx);
   if (spoken.result) return spoken.result;
+  const ytSpoken = await youTubeTranscriptAndStructure(env, url.toString(), text, ctx);
+  if (ytSpoken.result) return ytSpoken.result;
   const fromCover = await tryCoverImage(env, content, url.toString());
   if (fromCover) return fromCover;
-  let dish = spoken.dish ?? null;
+  let dish = spoken.dish ?? ytSpoken.dish ?? null;
   if (!dish && content.title && llmAvailable(env)) {
     // Even a bare title usually names the dish ("How French Restaurants
     // Make Tarte Tatin") — one cheap pass to seed the similar-recipe search.
@@ -147,7 +159,7 @@ export async function extractFromUrl(env: Env, input: string): Promise<ExtractRe
   return {
     ok: false,
     code: 'no_recipe_found',
-    message: noRecipeMessage(platform, text, spoken.audio, true, content.imageUrl !== null, dish),
+    message: noRecipeMessage(platform, text, ytSpoken.audio ?? spoken.audio, true, content.imageUrl !== null, dish),
     fetchedText: text ? text.slice(0, 4000) : undefined,
     dishGuess: dish ?? undefined,
   };
@@ -235,6 +247,33 @@ async function tryCoverImage(env: Env, content: { imageUrl: string | null }, _ur
 
 /** Why the audio path ended without a recipe — used to tell the user the truth. */
 type AudioOutcome = 'no-video' | 'unfetchable' | 'no-speech' | 'checked' | 'unsupported';
+
+/**
+ * YouTube's audio is unreachable from servers, but its spoken words are
+ * available through the youtube-transcript.io API when a token is configured.
+ * Same contract as transcribeAndStructure: result only on success, plus what
+ * the attempt learned (audio outcome for honest copy, dish guess if any).
+ */
+async function youTubeTranscriptAndStructure(
+  env: Env,
+  sourceUrl: string,
+  captionText: string,
+  ctx: LlmContext,
+): Promise<{ result: ExtractResult | null; audio: AudioOutcome | null; dish?: string | null }> {
+  if (ctx.platform !== 'youtube' || !env.TRANSCRIPT_API_KEY) return { result: null, audio: null };
+  const videoId = youTubeVideoId(sourceUrl);
+  if (!videoId) return { result: null, audio: null };
+  const transcript = await fetchYouTubeTranscript(env.TRANSCRIPT_API_KEY, videoId);
+  if (!transcript || transcript.length < MIN_USEFUL_TEXT) return { result: null, audio: 'no-speech' };
+  const combined = captionText
+    ? `${captionText}\n\nSpoken in the video:\n${transcript}`
+    : `Spoken in the video:\n${transcript}`;
+  const result = await structureWithLlm(env, combined, { ...ctx, extractedFrom: 'transcript' });
+  if (!result.ok && result.code === 'no_recipe_found') {
+    return { result: null, audio: 'checked', dish: result.dishGuess ?? null };
+  }
+  return { result, audio: 'checked' };
+}
 
 /** Captions that say the recipe lives somewhere else the creator controls. */
 const PAYWALL_RE =

@@ -111,6 +111,9 @@ export interface Env {
   // Official YouTube Data API v3 key (free) — the only reliable way to full
   // video descriptions from a datacenter IP; YouTube bot-walls everything else.
   YOUTUBE_API_KEY?: string;
+  // youtube-transcript.io API token (paid) — spoken-recipe extraction for
+  // YouTube, where audio itself is unreachable server-side.
+  TRANSCRIPT_API_KEY?: string;
   // Speech-to-text for hosts without the Workers AI binding. Any
   // OpenAI-compatible /audio/transcriptions endpoint (Groq, OpenAI).
   WHISPER_API_KEY?: string;
