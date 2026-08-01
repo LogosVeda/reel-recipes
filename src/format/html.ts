@@ -120,20 +120,37 @@ const SCRIPT = `
       navigator.clipboard.writeText(t).then(done,function(){fallbackCopy(t);done();});
     }else{fallbackCopy(t);done();}
   }
+  // Apple Notes has no create-note URL or API a website may call, so the
+  // system share sheet is the sanctioned "add to Notes" path: one tap on
+  // Notes (or Keep, or anything) creates a new, prefilled note — the same
+  // one-picker flow as adding a calendar invite. Where Web Share is missing
+  // (most desktops), the buttons keep their copy behavior and wording.
+  function deliver(t,btn){
+    if(navigator.share){
+      navigator.share({text:t}).catch(function(err){
+        if(err&&err.name==='AbortError')return; // user closed the sheet
+        copyText(t,btn);
+      });
+    }else{copyText(t,btn);}
+  }
   var copies=document.querySelectorAll('button[data-copy]');
   for(var j=0;j<copies.length;j++){(function(btn){
+    if(navigator.share){
+      var shareLabel=btn.getAttribute('data-share-label');
+      if(shareLabel)btn.textContent=shareLabel;
+    }
     btn.addEventListener('click',function(){
       var mode=btn.getAttribute('data-copy');
       if(mode==='note'){
         fetch(btn.getAttribute('data-url'))
           .then(function(r){return r.text();})
-          .then(function(t){copyText(t,btn);})
-          .catch(function(){btn.textContent='Copy failed';});
+          .then(function(t){deliver(t,btn);})
+          .catch(function(){btn.textContent='Could not load the note';});
       }else{
         var spans=document.querySelectorAll('ul.check span.txt');
         var out=[];
         for(var i=0;i<spans.length;i++){out.push('\\u2022 '+spans[i].textContent);}
-        copyText(out.join('\\n'),btn);
+        deliver(out.join('\\n'),btn);
       }
     });
   })(copies[j]);}
@@ -293,7 +310,7 @@ ${recipe.steps.length > 0 ? `<h2>Steps</h2>\n${stepsOut.join('\n')}` : ''}
 ${notes}
 <div class="actions">
 <a class="btn primary" href="${esc(idPath)}/list?x=${fp}${lq}">Shopping list</a>
-<button class="btn ghost" data-copy="note" data-url="${esc(noteUrl)}">Copy note for Apple Notes</button>
+<button class="btn ghost" data-copy="note" data-url="${esc(noteUrl)}" data-share-label="Add to Notes…">Copy note for Apple Notes</button>
 </div>`;
 
   return shell(recipe.title, body, recipe.language);
@@ -316,7 +333,7 @@ export function renderShoppingListPage(recipe: Recipe, origin: string, factor: n
 ${servings}
 ${checklist(recipe, factor, 'list')}
 <div class="actions">
-<button class="btn primary" data-copy="list">Copy list</button>
+<button class="btn primary" data-copy="list" data-share-label="Add list to Notes…">Copy list</button>
 </div>`;
 
   return shell(title, body, recipe.language);
