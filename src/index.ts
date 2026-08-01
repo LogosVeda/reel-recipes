@@ -206,7 +206,10 @@ app.get('/r/:id/list', async (c) => {
   const origin = new URL(c.req.url).origin;
   const factor = scaleFactor(recipe, c.req.query('x'), c.req.query('servings'));
   const localized = await getRecipeInLang(c.env, recipe, pickLang(c));
-  return c.html(renderShoppingListPage(localized, origin, factor));
+  return c.html(renderShoppingListPage(localized, origin, factor, {
+    originalLanguage: recipe.language ?? null,
+    currentLang: c.req.query('lang') ?? '',
+  }));
 });
 
 app.notFound((c) => {

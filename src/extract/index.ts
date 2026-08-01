@@ -2,6 +2,7 @@
 // site provides it, otherwise caption/description text → LLM structuring.
 import type { Env, ExtractResult, Ingredient, Platform, Recipe, Step } from '../types.js';
 import { extractJsonLdRecipe } from './jsonld.js';
+import { looksTruncated } from './html.js';
 import { detectPlatform, fetchContent, fetchImageBytes, fetchVideoBytes, fetchYouTubeTranscript, youTubeVideoId } from './platforms.js';
 import { validateUrl } from './url.js';
 import { bytesToBase64, llmAvailable, sniffImageType, structureRecipeImage, structureRecipeText, transcribeAudio, transcriptionAvailable } from '../llm.js';
@@ -84,7 +85,11 @@ export async function extractFromUrl(env: Env, input: string): Promise<ExtractRe
     author: content.author,
     siteName: content.siteName,
     extractedFrom: 'caption',
-    extraNotes: content.truncated
+    // The truncated flag is heuristic (it also drives transcribe-first, where
+    // a false positive is harmless). The user-facing warning needs certainty:
+    // only show it when the caption visibly ends in Facebook's own ellipsis —
+    // captions ending in a signoff ("Happy cooking, Adam x") are complete.
+    extraNotes: content.truncated && looksTruncated(text)
       ? [`${platformName(platform)} cut the description short — check the original post in case final steps are missing.`]
       : [],
   };

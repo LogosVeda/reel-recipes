@@ -182,12 +182,12 @@ function checklist(recipe: Recipe, factor: number, keyKind: 'ing' | 'list'): str
   return out.join('\n');
 }
 
-function scaleControl(recipe: Recipe, factor: number, path: string): string {
+function scaleControl(recipe: Recipe, factor: number, path: string, langQuery = ''): string {
   const options = [0.5, 1, 2, 3, 4];
   const links = options
     .map((f) => {
       const on = Math.abs(f - factor) < 0.001 ? ' class="on"' : '';
-      return `<a${on} href="${esc(path)}?x=${factorParam(f)}">${factorParam(f)}x</a>`;
+      return `<a${on} href="${esc(path)}?x=${factorParam(f)}${langQuery}">${factorParam(f)}x</a>`;
     })
     .join('');
   const servings =
@@ -202,6 +202,17 @@ export interface RenderOptions {
   originalLanguage: string | null;
   /** The ?lang= value in effect ('' = following the device language) */
   currentLang: string;
+}
+
+/**
+ * Query fragment that carries an EXPLICIT ?lang= choice into every link and
+ * fetch on the page (scale pills, shopping list, copy-note). Without it, the
+ * page can show English while the copy button silently follows the device
+ * language — the exact bug where a note arrived in Spanish.
+ */
+function langQueryOf(opts?: RenderOptions): string {
+  const l = opts?.currentLang ?? '';
+  return /^([a-z]{2}|orig)$/i.test(l) ? `&lang=${l.toLowerCase()}` : '';
 }
 
 function languageSelector(recipe: Recipe, idPath: string, fp: string, opts?: RenderOptions): string {
@@ -266,31 +277,33 @@ export function renderRecipePage(recipe: Recipe, origin: string, factor: number,
     ? `<h2>Notes</h2><ul class="notes">${recipe.notes.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>`
     : '';
 
-  const noteUrl = `/api/recipe/${encodeURIComponent(recipe.id)}/note?x=${fp}`;
+  const lq = langQueryOf(opts);
+  const noteUrl = `/api/recipe/${encodeURIComponent(recipe.id)}/note?x=${fp}${lq}`;
 
   const body = `
 <h1>${esc(recipe.title)}</h1>
 ${sourceLine}
 ${recipe.description !== null ? `<p class="source">${esc(recipe.description)}</p>` : ''}
 ${meta}
-${scaleControl(recipe, factor, idPath)}
+${scaleControl(recipe, factor, idPath, lq)}
 ${languageSelector(recipe, idPath, fp, opts)}
 <h2>Ingredients</h2>
 ${checklist(recipe, factor, 'ing')}
 ${recipe.steps.length > 0 ? `<h2>Steps</h2>\n${stepsOut.join('\n')}` : ''}
 ${notes}
 <div class="actions">
-<a class="btn primary" href="${esc(idPath)}/list?x=${fp}">Shopping list</a>
+<a class="btn primary" href="${esc(idPath)}/list?x=${fp}${lq}">Shopping list</a>
 <button class="btn ghost" data-copy="note" data-url="${esc(noteUrl)}">Copy note for Apple Notes</button>
 </div>`;
 
   return shell(recipe.title, body, recipe.language);
 }
 
-export function renderShoppingListPage(recipe: Recipe, origin: string, factor: number): string {
+export function renderShoppingListPage(recipe: Recipe, origin: string, factor: number, opts?: RenderOptions): string {
   const fp = factorParam(factor);
   const idPath = `/r/${encodeURIComponent(recipe.id)}`;
   const title = `${recipe.title} — Shopping list`;
+  const lq = langQueryOf(opts);
 
   const servings =
     recipe.servings !== null
@@ -298,7 +311,7 @@ export function renderShoppingListPage(recipe: Recipe, origin: string, factor: n
       : '';
 
   const body = `
-<a class="back" href="${esc(idPath)}?x=${fp}">← Back to recipe</a>
+<a class="back" href="${esc(idPath)}?x=${fp}${lq}">← Back to recipe</a>
 <h1>${esc(title)}</h1>
 ${servings}
 ${checklist(recipe, factor, 'list')}
