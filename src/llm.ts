@@ -18,6 +18,11 @@ const RECIPE_SCHEMA = {
       description:
         'ONLY meaningful when is_recipe is false: the name of the dish being shown or discussed (e.g. "chicken pastina soup"), in the language of the text, when one is clearly identifiable; null otherwise.',
     },
+    dish_guess_en: {
+      type: ['string', 'null'],
+      description:
+        'The same dish name translated into ENGLISH (e.g. "Медовик" -> "honey cake", "chlodnik" -> "cold beetroot soup"). Used to search English recipe sites, so prefer the common English name of the dish. null when dish_guess is null.',
+    },
     title: {
       type: 'string',
       description: 'The dish name. If none is written, compose a short descriptive title from the main ingredients, in the recipe\'s own language — never "Untitled".',
@@ -70,7 +75,7 @@ const RECIPE_SCHEMA = {
     notes: { type: 'array', items: { type: 'string' } },
   },
   required: [
-    'is_recipe', 'dish_guess', 'title', 'language', 'description', 'servings', 'prep_minutes',
+    'is_recipe', 'dish_guess', 'dish_guess_en', 'title', 'language', 'description', 'servings', 'prep_minutes',
     'cook_minutes', 'total_minutes', 'ingredients', 'steps', 'notes',
   ],
   additionalProperties: false,
@@ -98,6 +103,8 @@ export interface LlmRecipeResult {
   isRecipe: boolean;
   /** When isRecipe is false: the dish the post is about, if identifiable. */
   dishGuess: string | null;
+  /** The same dish name in English — non-Latin names can't search Anglo recipe sites. */
+  dishGuessEn: string | null;
   title: string;
   language: string | null;
   description: string | null;
@@ -351,6 +358,15 @@ const IMAGE_PROMPT_SUFFIX =
   '\n\nThe user provides a SCREENSHOT (a social-media post or comment, a video frame with on-screen text, a cookbook page, or a handwritten note). Read the recipe text visible in the image and extract it. Ignore UI chrome (buttons, like counts, usernames of commenters, timestamps).';
 
 /** Detect the image format from base64 magic bytes; null if not a supported image. */
+/**
+ * Cover/thumbnail images are NOT user screenshots: they are usually just a
+ * glamour photo of the finished dish. Without this instruction the model
+ * happily invents a plausible recipe from the picture alone — which is worse
+ * than failing, because invented quantities look authoritative.
+ */
+const COVER_PROMPT_SUFFIX =
+  '\n\nCRITICAL: this image is a video COVER/THUMBNAIL. Extract a recipe ONLY if the image contains READABLE WRITTEN RECIPE TEXT (an ingredient list, quantities, or written steps visible in the picture). If it is merely a photograph of finished food, a title card, or has no legible recipe text, you MUST set is_recipe to false and leave the arrays empty. NEVER infer, guess or reconstruct ingredients from what the dish looks like.';
+
 export function sniffImageType(b64: string): 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp' | null {
   if (b64.startsWith('iVBORw0')) return 'image/png';
   if (b64.startsWith('/9j/')) return 'image/jpeg';
@@ -367,13 +383,15 @@ export async function structureRecipeImage(
   env: Env,
   imageB64: string,
   mediaType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp',
+  source: 'screenshot' | 'cover' = 'screenshot',
 ): Promise<LlmRecipeResult> {
   const provider = chooseProvider(env);
   if (provider === null) throw new Error('No LLM backend configured');
+  const extra = source === 'cover' ? COVER_PROMPT_SUFFIX : '';
   const raw =
     provider === 'anthropic'
-      ? await runClaudeVision(env, imageB64, mediaType)
-      : await runWorkersAiVision(env, imageB64, mediaType);
+      ? await runClaudeVision(env, imageB64, mediaType, extra)
+      : await runWorkersAiVision(env, imageB64, mediaType, extra);
   return normalize(raw);
 }
 
@@ -381,9 +399,10 @@ async function runClaudeVision(
   env: Env,
   imageB64: string,
   mediaType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp',
+  extra = '',
 ): Promise<any> {
   return callClaude(env, {
-    system: SYSTEM_PROMPT + IMAGE_PROMPT_SUFFIX,
+    system: SYSTEM_PROMPT + IMAGE_PROMPT_SUFFIX + extra,
     schema: RECIPE_SCHEMA,
     messages: [
       {
@@ -401,6 +420,7 @@ async function runWorkersAiVision(
   env: Env,
   imageB64: string,
   mediaType: string,
+  extra = '',
 ): Promise<any> {
   // Same no-response_format rule as the text path (constrained decoding hangs);
   // llama-4-scout takes OpenAI-style image_url content with a data URI.
@@ -411,6 +431,7 @@ async function runWorkersAiVision(
           content:
             SYSTEM_PROMPT +
             IMAGE_PROMPT_SUFFIX +
+            extra +
             '\n\nRespond with ONLY a single JSON object matching this schema exactly' +
             ' (every property present, null where unknown; no markdown fences, no commentary):\n' +
             JSON.stringify(RECIPE_SCHEMA),
@@ -522,6 +543,12 @@ function normalize(raw: any): LlmRecipeResult {
       // A model that echoes filler ("null", "n/a", "unknown") gives us nothing.
       return d && d.length >= 3 && !/^(null|none|n\/a|unknown|not specified)$/i.test(d) ? d : null;
     })(),
+    dishGuessEn: (() => {
+      const d = str(raw?.dish_guess_en);
+      if (!d || d.length < 3 || /^(null|none|n\/a|unknown|not specified)$/i.test(d)) return null;
+      // Must actually be Latin script to be usable as an English search query.
+      return /[a-z]/i.test(d) && !/[^\u0000-\u024F\s'’.-]/.test(d) ? d : null;
+    })(),
     title: str(raw?.title) ?? 'Untitled recipe',
     language: (() => {
       const l = str(raw?.language)?.toLowerCase() ?? null;
@@ -536,6 +563,132 @@ function normalize(raw: any): LlmRecipeResult {
     steps,
     notes: Array.isArray(raw?.notes) ? raw.notes.map(str).filter(Boolean) as string[] : [],
   };
+}
+
+/**
+ * English name of a dish, for searching Anglo recipe sites. Latin-script names
+ * pass through untouched; anything else gets one tiny translation call. The
+ * big schema's dish_guess_en field is often ignored by the fallback model, so
+ * this focused prompt is the reliable path ("Медовик" -> "honey cake").
+ */
+/**
+ * Read the text VISIBLE in an image, verbatim. Used for video cover frames:
+ * asking a vision model to "extract the recipe" from a glamour photo of the
+ * finished dish makes it invent one, however sternly the prompt forbids it.
+ * Transcription is a checkable task — no text in, no text out — so the caller
+ * can require real words before anything becomes a recipe.
+ */
+export async function readImageText(
+  env: Env,
+  imageB64: string,
+  mediaType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp',
+): Promise<string | null> {
+  const provider = chooseProvider(env);
+  if (provider === null) return null;
+  const system =
+    'You are an OCR engine. Transcribe ONLY the text that is literally visible in the image, ' +
+    'verbatim, preserving line breaks. Do not translate, summarise, describe the picture, or add ' +
+    'anything. If the image contains no legible text, reply with exactly: NO_TEXT';
+  const instruction = 'Transcribe the visible text.';
+  try {
+    let out: string | null = null;
+    if (provider === 'anthropic') {
+      const raw = await callClaude(env, {
+        system,
+        maxTokens: 2000,
+        schema: {
+          type: 'object',
+          properties: { text: { type: 'string' } },
+          required: ['text'],
+          additionalProperties: false,
+        },
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: mediaType, data: imageB64 } },
+            { type: 'text', text: instruction },
+          ],
+        }],
+      });
+      out = typeof raw?.text === 'string' ? raw.text : null;
+    } else {
+      const payload = await runAi(env, '@cf/meta/llama-4-scout-17b-16e-instruct', {
+        messages: [
+          { role: 'system', content: system },
+          {
+            role: 'user',
+            content: [
+              { type: 'image_url', image_url: { url: `data:${mediaType};base64,${imageB64}` } },
+              { type: 'text', text: instruction },
+            ],
+          },
+        ],
+        max_tokens: 1500,
+      });
+      out = typeof payload === 'string' ? payload : ((payload as any)?.response ?? null);
+    }
+    if (!out) return null;
+    const text = fixMojibake(out).trim();
+    if (!text || /^NO[_\s]?TEXT/i.test(text)) return null;
+    return text;
+  } catch {
+    return null;
+  }
+}
+
+export async function dishNameInEnglish(env: Env, dish: string): Promise<string | null> {
+  const trimmed = dish.trim();
+  if (!trimmed) return null;
+  // Already Latin script (allow accents) — usable as-is.
+  if (!/[^\u0000-\u024F\s'’.,()-]/.test(trimmed)) return trimmed;
+
+  const system =
+    'You translate DISH NAMES into English. Reply with ONLY the common English name of the dish, ' +
+    '2-5 words, no quotes, no explanation. If it is a well-known dish, use the name English speakers ' +
+    'would search for (e.g. "Медовик" -> "honey cake", "Чебуреки" -> "chebureki fried turnovers").';
+  const clean = (v: unknown): string | null => {
+    if (typeof v !== 'string') return null;
+    const out = fixMojibake(v).trim().replace(/^["'`]|["'`]$/g, '').split('\n')[0]!.trim();
+    if (!out || out.length > 60) return null;
+    // Must be Latin script to be worth searching with.
+    return /[a-z]/i.test(out) && !/[^\u0000-\u024F\s'’.,()-]/.test(out) ? out : null;
+  };
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+  try {
+    if (env.ANTHROPIC_API_KEY) {
+      const raw = await callClaude(env, {
+        system,
+        maxTokens: 100,
+        schema: {
+          type: 'object',
+          properties: { english_name: { type: 'string' } },
+          required: ['english_name'],
+          additionalProperties: false,
+        },
+        messages: [{ role: 'user', content: trimmed }],
+      });
+      const got = clean(raw?.english_name);
+      if (got) return got;
+      continue;
+    }
+    if (env.AI) {
+      const payload = await runAi(env, '@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: trimmed },
+        ],
+        max_tokens: 40,
+      });
+      const got = clean(typeof payload === 'string' ? payload : (payload as any)?.response);
+      if (got) return got;
+      continue;
+    }
+  } catch {
+    /* best effort — try once more, then the caller falls back */
+  }
+  }
+  return null;
 }
 
 // Common target languages offered by the UI selector.

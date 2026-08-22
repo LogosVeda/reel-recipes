@@ -142,10 +142,38 @@ export function titlesPlausiblyMatch(dish: string, foundTitle: string): boolean 
  * Candidate recipe pages for a dish, best sources first. Never throws;
  * [] when every strategy comes up dry.
  */
+/**
+ * Order hits by how well their titles match the dish, best first. Site search
+ * returns results in site order, so without this the first fetched candidate
+ * is arbitrary — "Cornbread Cake with Honey Buttercream" would win over
+ * "russian honey cake" for a Medovik. Untitled hits keep their position.
+ */
+export function rankHits(query: string, hits: SearchHit[]): SearchHit[] {
+  const words = (s: string) => fold(s).split(/[^a-z0-9]+/).filter((w) => w.length >= 4);
+  const q = words(query);
+  const qSet = new Set(q);
+  const qPhrase = fold(query).replace(/[^a-z0-9]+/g, ' ').trim();
+  const score = (hit: SearchHit): number => {
+    if (!hit.title) return 0;
+    const t = words(hit.title);
+    if (t.length === 0) return 0;
+    const matched = t.filter((w) => qSet.has(w)).length;
+    const covered = q.filter((w) => t.includes(w)).length / Math.max(1, q.length);
+    const phrase = fold(hit.title).replace(/[^a-z0-9]+/g, ' ').includes(qPhrase) ? 6 : 0;
+    // Reward covering the whole dish name; penalise padding words that signal
+    // a different dish ("cornbread", "buttercream").
+    return phrase + covered * 5 + matched * 2 - (t.length - matched) * 0.6;
+  };
+  return [...hits]
+    .map((h, i) => ({ h, i, s: score(h) }))
+    .sort((a, b) => b.s - a.s || a.i - b.i)
+    .map((x) => x.h);
+}
+
 export async function searchWeb(dish: string): Promise<SearchHit[]> {
   const ddg = await duckDuckGo(`${dish} recipe`);
   if (ddg.length > 0) return ddg.map((url) => ({ url, title: null }));
   const pool = poolFor(dish);
   const perSite = await Promise.all(pool.map((host) => wordPressSearch(host, dish)));
-  return perSite.flat();
+  return rankHits(dish, perSite.flat());
 }

@@ -93,6 +93,8 @@ export type ExtractResult =
       fetchedText?: string;
       /** The dish the post is about, when identifiable despite having no recipe */
       dishGuess?: string;
+      /** The same dish name in English, for searching Anglo recipe sites */
+      dishGuessEn?: string;
     };
 
 export interface Env {

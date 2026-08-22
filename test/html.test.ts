@@ -6,7 +6,7 @@ import {
   stripInstagramTitlePrefix,
   unwrapInstagramDescription,
 } from '../src/extract/html';
-import { parseDuckDuckGoResults, titlesPlausiblyMatch } from '../src/extract/search';
+import { parseDuckDuckGoResults, rankHits, titlesPlausiblyMatch } from '../src/extract/search';
 import { parseTranscriptPayload } from '../src/extract/platforms';
 
 describe('decodeEntities', () => {
@@ -191,6 +191,22 @@ describe('parseTranscriptPayload', () => {
   it('returns null on shapes it does not recognize', () => {
     expect(parseTranscriptPayload({ nothing: true })).toBeNull();
     expect(parseTranscriptPayload([])).toBeNull();
+  });
+});
+
+describe('rankHits', () => {
+  it('puts the closest dish match first, not the first site searched', () => {
+    const hits = [
+      { url: 'https://budgetbytes.com/a', title: 'Cornbread Cake with Honey Buttercream' },
+      { url: 'https://budgetbytes.com/b', title: 'Icebox Cake' },
+      { url: 'https://smittenkitchen.com/c', title: 'russian honey cake' },
+    ];
+    expect(rankHits('honey cake', hits)[0]!.url).toBe('https://smittenkitchen.com/c');
+  });
+
+  it('keeps original order for untitled hits', () => {
+    const hits = [ { url: 'https://a.com/1', title: null }, { url: 'https://b.com/2', title: null } ];
+    expect(rankHits('honey cake', hits).map((h) => h.url)).toEqual(['https://a.com/1', 'https://b.com/2']);
   });
 });
 

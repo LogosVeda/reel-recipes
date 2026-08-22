@@ -5,7 +5,7 @@ import { extractJsonLdRecipe } from './jsonld.js';
 import { looksTruncated } from './html.js';
 import { detectPlatform, fetchContent, fetchImageBytes, fetchVideoBytes, fetchYouTubeTranscript, youTubeVideoId } from './platforms.js';
 import { validateUrl } from './url.js';
-import { bytesToBase64, llmAvailable, sniffImageType, structureRecipeImage, structureRecipeText, transcribeAudio, transcriptionAvailable } from '../llm.js';
+import { bytesToBase64, dishNameInEnglish, llmAvailable, readImageText, sniffImageType, structureRecipeImage, structureRecipeText, transcribeAudio, transcriptionAvailable } from '../llm.js';
 import { detectMinutes, parseIngredientLine } from '../scale.js';
 import { newRecipeId, saveRecipe } from '../store.js';
 import { searchWeb, titlesPlausiblyMatch } from './search.js';
@@ -124,8 +124,9 @@ export async function extractFromUrl(env: Env, input: string): Promise<ExtractRe
     // The post names a dish even though it hides the recipe — find a public
     // recipe for the same dish rather than returning empty-handed.
     const dish = captionResult.dishGuess ?? spoken.dish ?? ytSpoken.dish ?? null;
+    const dishEn = captionResult.dishGuessEn ?? spoken.dishEn ?? ytSpoken.dishEn ?? null;
     if (dish) {
-      const similar = await findSimilarRecipe(env, dish, url.toString(), PAYWALL_RE.test(text));
+      const similar = await findSimilarRecipe(env, dish, url.toString(), PAYWALL_RE.test(text), dishEn);
       if (similar) return similar;
     }
     return {
@@ -144,7 +145,9 @@ export async function extractFromUrl(env: Env, input: string): Promise<ExtractRe
   if (ytSpoken.result) return ytSpoken.result;
   const fromCover = await tryCoverImage(env, content, url.toString());
   if (fromCover) return fromCover;
+  const coverScanned = content.imageUrl !== null;
   let dish = spoken.dish ?? ytSpoken.dish ?? null;
+  let dishEn = spoken.dishEn ?? ytSpoken.dishEn ?? null;
   if (!dish && content.title && llmAvailable(env)) {
     // Even a bare title usually names the dish ("How French Restaurants
     // Make Tarte Tatin") — one cheap pass to seed the similar-recipe search.
@@ -154,17 +157,20 @@ export async function extractFromUrl(env: Env, input: string): Promise<ExtractRe
         `Video title: "${content.title}". This text is only the video's title — it contains no recipe itself. What dish is the video about?`,
         ctx,
       );
-      if (!seed.ok && seed.code === 'no_recipe_found') dish = seed.dishGuess ?? null;
+      if (!seed.ok && seed.code === 'no_recipe_found') {
+        dish = seed.dishGuess ?? null;
+        dishEn = seed.dishGuessEn ?? null;
+      }
     } catch { /* the seed is best-effort */ }
   }
   if (dish) {
-    const similar = await findSimilarRecipe(env, dish, url.toString(), PAYWALL_RE.test(text));
+    const similar = await findSimilarRecipe(env, dish, url.toString(), PAYWALL_RE.test(text), dishEn);
     if (similar) return similar;
   }
   return {
     ok: false,
     code: 'no_recipe_found',
-    message: noRecipeMessage(platform, text, ytSpoken.audio ?? spoken.audio, true, content.imageUrl !== null, dish),
+    message: noRecipeMessage(platform, text, ytSpoken.audio ?? spoken.audio, true, coverScanned, dish),
     fetchedText: text ? text.slice(0, 4000) : undefined,
     dishGuess: dish ?? undefined,
   };
@@ -182,14 +188,18 @@ async function findSimilarRecipe(
   dish: string,
   originalUrl: string,
   paywalled: boolean,
+  dishEn?: string | null,
 ): Promise<ExtractResult | null> {
-  const hits = await searchWeb(dish);
+  // Search in English when the dish name is not Latin script — "Медовик"
+  // finds nothing on Anglo recipe sites, "honey cake" finds plenty.
+  const query = dishEn || (await dishNameInEnglish(env, dish)) || dish;
+  const hits = await searchWeb(query);
   let fetches = 0;
   for (const hit of hits) {
     if (fetches >= 3) break;
     // A titled hit that shares no word with the dish isn't worth a fetch —
     // WordPress search returns its best fuzzy guess for anything.
-    if (hit.title && !titlesPlausiblyMatch(dish, hit.title)) continue;
+    if (hit.title && !titlesPlausiblyMatch(query, hit.title)) continue;
     const candidate = hit.url;
     fetches++;
     try {
@@ -199,7 +209,7 @@ async function findSimilarRecipe(
       if (!jsonld || jsonld.ingredientLines.length === 0 || jsonld.steps.length === 0) continue;
       // Fuzzy site search can return its best wrong guess — demand at least
       // one substantive word in common between dish and found recipe.
-      if (jsonld.title && !titlesPlausiblyMatch(dish, jsonld.title)) continue;
+      if (jsonld.title && !titlesPlausiblyMatch(query, jsonld.title)) continue;
       const host = new URL(candidate).hostname.replace(/^www\./, '');
       const recipe = assembleRecipe(env, {
         title: jsonld.title || content.title || dish,
@@ -243,7 +253,25 @@ async function tryCoverImage(env: Env, content: { imageUrl: string | null }, _ur
   const bytes = await fetchImageBytes(content.imageUrl);
   if (!bytes) return null;
   try {
-    const result = await extractFromImage(env, bytesToBase64(bytes), _url);
+    const b64 = bytesToBase64(bytes);
+    const mediaType = sniffImageType(b64);
+    if (!mediaType) return null;
+    // Transcribe first, then structure the TRANSCRIPT as text. Asking a vision
+    // model to "extract the recipe" from a photo of a finished cake makes it
+    // invent one; requiring readable words on the image is a real gate.
+    const seen = await readImageText(env, b64, mediaType);
+    if (!seen || seen.length < MIN_USEFUL_TEXT) return null;
+    // A thumbnail carrying a real recipe shows quantities; prose alone (a
+    // channel name, a title card) must not become ingredients.
+    if (!/\d/.test(seen)) return null;
+    const result = await structureWithLlm(env, seen, {
+      url: _url,
+      platform: detectPlatform(_url),
+      author: null,
+      siteName: null,
+      extractedFrom: 'image',
+      extraNotes: ['Read from the text shown on the video’s cover image — double-check it against the video.'],
+    });
     return result.ok ? result : null;
   } catch {
     return null;
@@ -264,7 +292,7 @@ async function youTubeTranscriptAndStructure(
   sourceUrl: string,
   captionText: string,
   ctx: LlmContext,
-): Promise<{ result: ExtractResult | null; audio: AudioOutcome | null; dish?: string | null }> {
+): Promise<{ result: ExtractResult | null; audio: AudioOutcome | null; dish?: string | null; dishEn?: string | null }> {
   if (ctx.platform !== 'youtube' || !env.TRANSCRIPT_API_KEY) return { result: null, audio: null };
   const videoId = youTubeVideoId(sourceUrl);
   if (!videoId) return { result: null, audio: null };
@@ -275,7 +303,7 @@ async function youTubeTranscriptAndStructure(
     : `Spoken in the video:\n${transcript}`;
   const result = await structureWithLlm(env, combined, { ...ctx, extractedFrom: 'transcript' });
   if (!result.ok && result.code === 'no_recipe_found') {
-    return { result: null, audio: 'checked', dish: result.dishGuess ?? null };
+    return { result: null, audio: 'checked', dish: result.dishGuess ?? null, dishEn: result.dishGuessEn ?? null };
   }
   return { result, audio: 'checked' };
 }
@@ -295,7 +323,9 @@ function noRecipeMessage(platform: Platform, caption: string, audio: AudioOutcom
   if (dish) parts.push(`This looks like ${dish}.`);
   parts.push(
     thinCaption
-      ? `This ${name} post has no written description to read.`
+      ? platform === 'youtube'
+        ? `YouTube only shared this video's title with us — it blocks apps from reading video descriptions, where the recipe usually lives.`
+        : `This ${name} post has no written description to read.`
       : `The caption on this ${name} post is only a teaser — the recipe itself isn't written in it.`
   );
   if (audio === 'unsupported') {
@@ -320,7 +350,9 @@ function noRecipeMessage(platform: Platform, caption: string, audio: AudioOutcom
     );
   } else {
     parts.push(
-      `If the recipe is in the comments or shown on screen, screenshot it and use the screenshots option — comments are the one thing ${name} hides from every app.`
+      platform === 'youtube'
+        ? `Open the video's description, copy the recipe text and paste it here — or send a screenshot of it. (Setting a free YouTube API key on this deployment removes this step for everyone.)`
+        : `If the recipe is in the comments or shown on screen, screenshot it and use the screenshots option — comments are the one thing ${name} hides from every app.`
     );
   }
   return parts.join(' ');
@@ -337,7 +369,7 @@ async function transcribeAndStructure(
   content: { videoUrl: string | null },
   captionText: string,
   ctx: LlmContext,
-): Promise<{ result: ExtractResult | null; audio: AudioOutcome; dish?: string | null }> {
+): Promise<{ result: ExtractResult | null; audio: AudioOutcome; dish?: string | null; dishEn?: string | null }> {
   // Transcription needs either the Workers AI binding or an HTTP Whisper key —
   // without one, say so rather than blaming the platform for withholding video.
   if (!transcriptionAvailable(env)) return { result: null, audio: 'unsupported' };
@@ -355,7 +387,7 @@ async function transcribeAndStructure(
     // "We listened and there's still no recipe" must NOT end the funnel —
     // the caller still has the cover scan and the similar-recipe search to
     // try. Hand back what we learned (the dish, if named) and keep going.
-    return { result: null, audio: 'checked', dish: result.dishGuess ?? null };
+    return { result: null, audio: 'checked', dish: result.dishGuess ?? null, dishEn: result.dishGuessEn ?? null };
   }
   return { result, audio: 'checked' };
 }
@@ -381,7 +413,7 @@ export async function extractFromPaste(env: Env, text: string, sourceUrl?: strin
 }
 
 /** Screenshot flow: the user's screenshot (comments, on-screen text, cookbook page) → vision LLM. */
-export async function extractFromImage(env: Env, imageB64: string, sourceUrl?: string): Promise<ExtractResult> {
+export async function extractFromImage(env: Env, imageB64: string, sourceUrl?: string, source: 'screenshot' | 'cover' = 'screenshot'): Promise<ExtractResult> {
   const cleaned = imageB64.replace(/^data:[^;]+;base64,/, '').replace(/\s+/g, '');
   const mediaType = sniffImageType(cleaned);
   if (!mediaType) {
@@ -409,7 +441,7 @@ export async function extractFromImage(env: Env, imageB64: string, sourceUrl?: s
 
   let result;
   try {
-    result = await structureRecipeImage(env, cleaned, mediaType);
+    result = await structureRecipeImage(env, cleaned, mediaType, source);
   } catch (err) {
     return {
       ok: false,
@@ -458,7 +490,7 @@ interface LlmContext {
   platform: Recipe['source']['platform'];
   author: string | null;
   siteName: string | null;
-  extractedFrom: 'caption' | 'paste' | 'transcript';
+  extractedFrom: 'caption' | 'paste' | 'transcript' | 'image';
   /** Honest caveats to carry into the note (e.g. "description was truncated") */
   extraNotes?: string[];
 }
@@ -500,6 +532,7 @@ async function structureWithLlm(env: Env, text: string, ctx: LlmContext): Promis
           : `The text on this ${platformName(ctx.platform)} page doesn't contain the recipe itself.`,
       fetchedText: text.slice(0, 4000),
       dishGuess: result.dishGuess ?? undefined,
+      dishGuessEn: result.dishGuessEn ?? undefined,
     };
   }
 
