@@ -105,10 +105,13 @@ export async function extractFromUrl(env: Env, input: string): Promise<ExtractRe
     const captionResult = await structureWithLlm(env, text, ctx);
     if (captionResult.ok) {
       // "More informed" pass: a caption that gave ingredients but no method
-      // can be completed by the video's spoken words (YouTube transcript API).
+      // can be completed by the video's spoken words, or by the written
+      // recipe the description links to.
       if (captionResult.recipe.steps.length === 0) {
         const enriched = await youTubeTranscriptAndStructure(env, url.toString(), text, ctx);
         if (enriched.result?.ok && enriched.result.recipe.steps.length > 0) return enriched.result;
+        const linked = await tryDescriptionLinks(env, text, ctx);
+        if (linked) return linked;
       }
       return captionResult;
     }
@@ -119,6 +122,8 @@ export async function extractFromUrl(env: Env, input: string): Promise<ExtractRe
     const ytSpoken = await youTubeTranscriptAndStructure(env, url.toString(), text, ctx);
     if (ytSpoken.result) return ytSpoken.result;
     if (captionResult.code !== 'no_recipe_found') return captionResult;
+    const fromLinks = await tryDescriptionLinks(env, text, ctx);
+    if (fromLinks) return fromLinks;
     const fromCover = await tryCoverImage(env, content, url.toString());
     if (fromCover) return fromCover;
     // The post names a dish even though it hides the recipe — find a public
@@ -174,6 +179,78 @@ export async function extractFromUrl(env: Env, input: string): Promise<ExtractRe
     fetchedText: text ? text.slice(0, 4000) : undefined,
     dishGuess: dish ?? undefined,
   };
+}
+
+/**
+ * Creators routinely link the full written recipe from a video description
+ * ("full recipe on my blog", "Текстовая версия"). Follow those links and
+ * extract from the page — the one path that recovers a real method when the
+ * description itself only lists ingredients.
+ *
+ * Only accepts a result that actually ADDS steps, so a link farm of product
+ * and playlist URLs can never replace a good ingredient list with junk.
+ */
+const LINK_SKIP_HOSTS =
+  /(^|\.)(youtube\.com|youtu\.be|instagram\.com|facebook\.com|fb\.watch|tiktok\.com|twitter\.com|x\.com|t\.me|telegram\.me|rutube\.ru|vk\.com|patreon\.com|amazon\.[a-z.]+|bit\.ly|goo\.gl|tinyurl\.com|linktr\.ee|paypal\.[a-z.]+)$/i;
+
+/** Words that mark a link as "the recipe lives here", across our languages. */
+const RECIPE_LINK_HINT =
+  /(recipe|full\s+recipe|written|text\s*version|printable|blog|рецепт|текстова|przepis|receta)/i;
+
+export function recipeLinksFromText(text: string, max = 3): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const lines = text.split('\n');
+  const scored: Array<{ url: string; score: number }> = [];
+  for (const line of lines) {
+    const hinted = RECIPE_LINK_HINT.test(line);
+    for (const m of line.matchAll(/https?:\/\/[^\s<>"')]+/g)) {
+      let url = m[0].replace(/[.,;:)]+$/, '');
+      let host: string;
+      try {
+        host = new URL(url).hostname.replace(/^www\./, '');
+      } catch {
+        continue;
+      }
+      if (LINK_SKIP_HOSTS.test(host)) continue;
+      if (seen.has(url)) continue;
+      seen.add(url);
+      scored.push({ url, score: hinted ? 2 : 0 });
+    }
+  }
+  scored.sort((a, b) => b.score - a.score);
+  for (const s of scored) {
+    if (out.length >= max) break;
+    out.push(s.url);
+  }
+  return out;
+}
+
+async function tryDescriptionLinks(
+  env: Env,
+  description: string,
+  ctx: LlmContext,
+): Promise<ExtractResult | null> {
+  for (const link of recipeLinksFromText(description)) {
+    try {
+      const linked = await extractFromUrl(env, link);
+      // Only a page that yields an actual method is worth swapping in.
+      if (linked.ok && linked.recipe.steps.length > 0) {
+        const recipe: Recipe = {
+          ...linked.recipe,
+          notes: [
+            `Steps came from the recipe page the video links to (${new URL(link).hostname.replace(/^www\./, '')}).`,
+            ...linked.recipe.notes,
+          ],
+        };
+        await saveRecipe(env, recipe);
+        return { ok: true, recipe };
+      }
+    } catch {
+      continue;
+    }
+  }
+  return null;
 }
 
 /**
@@ -536,6 +613,12 @@ async function structureWithLlm(env: Env, text: string, ctx: LlmContext): Promis
     };
   }
 
+  // A post on a video platform means the method is being demonstrated, even
+  // when only ingredients are written down — say that, rather than implying
+  // the recipe is incomplete.
+  const videoLike =
+    ctx.platform === 'youtube' || ctx.platform === 'instagram' ||
+    ctx.platform === 'facebook' || ctx.platform === 'tiktok';
   const recipe: Recipe = {
     id: newRecipeId(),
     title: result.title,
@@ -555,7 +638,9 @@ async function structureWithLlm(env: Env, text: string, ctx: LlmContext): Promis
     steps: result.steps,
     notes: [
       ...(result.steps.length === 0
-        ? ['The method isn’t written out anywhere — watch the original video for the steps; the ingredient list above is complete.']
+        ? [videoLike
+            ? 'The creator demonstrates the method in the video — the post itself lists only ingredients, so follow along there for the steps.'
+            : 'Only an ingredient list was published — no method was written anywhere in the post.']
         : []),
       ...result.notes,
       ...(ctx.extraNotes ?? []),

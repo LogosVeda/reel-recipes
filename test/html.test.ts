@@ -8,6 +8,7 @@ import {
 } from '../src/extract/html';
 import { parseDuckDuckGoResults, rankHits, titlesPlausiblyMatch } from '../src/extract/search';
 import { parseTranscriptPayload } from '../src/extract/platforms';
+import { recipeLinksFromText } from '../src/extract/index';
 
 describe('decodeEntities', () => {
   it('decodes named entities', () => {
@@ -191,6 +192,31 @@ describe('parseTranscriptPayload', () => {
   it('returns null on shapes it does not recognize', () => {
     expect(parseTranscriptPayload({ nothing: true })).toBeNull();
     expect(parseTranscriptPayload([])).toBeNull();
+  });
+});
+
+describe('recipeLinksFromText', () => {
+  const desc = [
+    'Subscribe to my channel https://youtube.com/@dina',
+    'Buy the mixer https://bit.ly/RAWMID_RLM-05',
+    'Текстовая версия рецепта https://example-blog.com/medovik',
+    'Telegram https://t.me/dinarecipes',
+    'Random link https://other-site.com/page',
+  ].join('\n');
+
+  it('skips platform, shortener and social links', () => {
+    const links = recipeLinksFromText(desc);
+    expect(links.some((l) => l.includes('youtube.com'))).toBe(false);
+    expect(links.some((l) => l.includes('bit.ly'))).toBe(false);
+    expect(links.some((l) => l.includes('t.me'))).toBe(false);
+  });
+
+  it('puts a link labelled as the recipe first', () => {
+    expect(recipeLinksFromText(desc)[0]).toBe('https://example-blog.com/medovik');
+  });
+
+  it('returns nothing when a description has no usable links', () => {
+    expect(recipeLinksFromText('Just a caption with no links at all')).toEqual([]);
   });
 });
 
