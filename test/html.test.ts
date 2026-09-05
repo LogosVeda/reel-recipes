@@ -93,6 +93,7 @@ describe('extractMeta', () => {
       ogImage: null,
       siteName: null,
       author: null,
+      oembedTitle: null,
     });
   });
 });
@@ -237,8 +238,11 @@ describe('rankHits', () => {
 });
 
 describe('titlesPlausiblyMatch', () => {
-  it('accepts a shared substantive word', () => {
-    expect(titlesPlausiblyMatch('chicken pastina soup', 'Italian Wedding Soup')).toBe(true);
+  it('accepts a title that shares most of the dish words', () => {
+    expect(titlesPlausiblyMatch('chicken pastina soup', 'Italian Wedding Soup with Pastina')).toBe(true);
+  });
+  it('rejects a title that shares only a category word with a longer dish name', () => {
+    expect(titlesPlausiblyMatch('chicken pastina soup', 'Italian Wedding Soup')).toBe(false);
   });
   it('rejects unrelated dishes', () => {
     expect(titlesPlausiblyMatch('chłodnik jagodowy', 'Banana Bread')).toBe(false);

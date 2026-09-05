@@ -131,12 +131,30 @@ function fold(s: string): string {
  * fuzzy guess, and "blueberry chłodnik" must not come back as banana bread.
  */
 export function titlesPlausiblyMatch(dish: string, foundTitle: string): boolean {
-  const words = (s: string) => new Set(fold(s).split(/[^a-z0-9]+/).filter((w) => w.length >= 4));
+  const words = (s: string) => new Set(fold(s).split(/[^a-z0-9]+/).filter((w) => w.length >= 4 && !GENERIC_FOOD_WORDS.has(w)));
   const a = words(dish);
   const b = words(foundTitle);
-  for (const w of a) if (b.has(w)) return true;
-  return false;
+  if (a.size === 0) return true; // nothing distinctive to check against
+  let shared = 0;
+  for (const w of a) if (b.has(w)) shared++;
+  if (shared === 0) return false;
+  // Short dish names must appear whole ("banana bread" is not "zucchini
+  // bread"); longer ones must be mostly covered ("key lime sour cream pound
+  // cake" is not "sour cream coffee cake with walnut swirl"). Recipe titles
+  // are naturally descriptive ("The Best Tiramisu You Will Ever Make"), so
+  // extra words are fine — up to a point: a one-word dish must not be matched
+  // by a title that is mostly about something else.
+  const needed = a.size <= 2 ? a.size : Math.ceil(a.size * 0.66);
+  let foundOnly = 0;
+  for (const w of b) if (!a.has(w)) foundOnly++;
+  return shared >= needed && foundOnly <= Math.max(5, 2 * shared);
 }
+
+/** Words that name a category, not a dish — shared by half of all recipes. */
+const GENERIC_FOOD_WORDS = new Set([
+  'recipe', 'recipes', 'easy', 'best', 'homemade', 'simple', 'quick', 'classic', 'perfect', 'with', 'from', 'style',
+  'przepis', 'рецепт', 'receta', 'rezept', 'recette', 'ricetta',
+]);
 
 /**
  * Candidate recipe pages for a dish, best sources first. Never throws;

@@ -101,6 +101,8 @@ const TRANSCRIPT_NOTE =
 
 export interface LlmRecipeResult {
   isRecipe: boolean;
+  /** The model's own is_recipe flag — true with an empty ingredient list is a contradiction worth a retry. */
+  modelSaidRecipe: boolean;
   /** When isRecipe is false: the dish the post is about, if identifiable. */
   dishGuess: string | null;
   /** The same dish name in English — non-Latin names can't search Anglo recipe sites. */
@@ -151,8 +153,97 @@ export async function structureRecipeText(env: Env, text: string, isTranscript =
   const input = clipped.replace(/<\/?text>/gi, '');
   const provider = chooseProvider(env);
   if (provider === null) throw new Error('No LLM backend configured');
-  const raw = provider === 'anthropic' ? await runClaude(env, input, isTranscript) : await runWorkersAi(env, input, isTranscript);
-  return normalize(raw);
+
+  const hash = fnv1a(input);
+  const trace = (pass: number, provider: string, r: LlmRecipeResult) => {
+    // One line per model call: enough to reconstruct a wrong verdict later
+    // (which pass, which backend, what the model claimed) without retaining
+    // the text itself.
+    console.log(JSON.stringify({
+      evt: 'llm', pass, provider, chars: input.length, hash, transcript: isTranscript,
+      isRecipe: r.isRecipe, modelSaidRecipe: r.modelSaidRecipe, ingredients: r.ingredients.length,
+      steps: r.steps.length, dish: r.dishGuess, title: r.isRecipe ? r.title.slice(0, 60) : null,
+    }));
+  };
+
+  const run = async (pass: number, nudge?: string): Promise<LlmRecipeResult> => {
+    const prompt = nudge ? `${nudge}\n\n${input}` : input;
+    if (provider === 'anthropic') {
+      try {
+        const r = normalize(await runClaude(env, prompt, isTranscript));
+        trace(pass, 'claude', r);
+        return r;
+      } catch (err) {
+        // A Claude outage must not take the app down while a second backend
+        // sits idle — degrade to Workers AI for this call.
+        if (!env.AI) throw err;
+        console.log(JSON.stringify({ evt: 'llm_fallback', reason: err instanceof Error ? err.message.slice(0, 120) : 'unknown' }));
+        const r = normalize(await runWorkersAi(env, prompt, isTranscript));
+        trace(pass, 'workers-ai', r);
+        return r;
+      }
+    }
+    const r = normalize(await runWorkersAi(env, prompt, isTranscript));
+    trace(pass, 'workers-ai', r);
+    return r;
+  };
+
+  let result = await run(1);
+  if (result.isRecipe) return result;
+  // A "no recipe" verdict on text that plainly lists quantities — or a model
+  // that says is_recipe=true and then lists nothing — is far more likely a
+  // bad sample than a true negative (seen on a Facebook caption with a full
+  // ingredient list and method, and on a YouTube description with a RECIPE
+  // section). One more, pointed try; then, if a free second backend exists,
+  // its independent opinion.
+  const suspicious = result.modelSaidRecipe || looksLikeRecipeText(input);
+  if (!suspicious) return result;
+  console.log(JSON.stringify({ evt: 'llm_retry', chars: input.length, hash, contradiction: result.modelSaidRecipe }));
+  const second = await run(
+    2,
+    'The text below appears to contain a recipe (an ingredient list with quantities, and possibly a method). Extract it faithfully; set is_recipe to false only if there truly are no ingredients written.',
+  );
+  if (second.isRecipe) return second;
+  if (provider === 'anthropic' && env.AI) {
+    try {
+      const third = normalize(await runWorkersAi(env, input, isTranscript));
+      trace(3, 'workers-ai', third);
+      if (third.isRecipe && third.ingredients.length >= 2) return third;
+    } catch {
+      /* the third opinion is best-effort */
+    }
+  }
+  return result;
+}
+
+/** 32-bit FNV-1a of a string, hex — a cheap fingerprint for matching log lines to inputs. */
+function fnv1a(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+const QUANTITY_RE =
+  /(?:^|[\s•·\-–*(:])(?:\d+\s+\d+\/\d+|\d+\/\d+|\d+(?:[.,]\d+)?|[¼½¾⅓⅔⅛]|\d+\s*[¼½¾⅓⅔⅛])\s*(?:g|kg|ml|l|oz|lb|lbs|cups?|c\.|tbsp|tbs|tsp|tablespoons?|teaspoons?|grams?|gramos?|gr|szkl(?:anki|anka|\.)?|łyż(?:ki|ka|eczki|eczka)?|ст\.?\s*л(?:ожк[аи])?\.?|ч\.?\s*л(?:ожк[аи])?\.?|гр?|мл|шт|eggs?|jajk?a|яиц|яйца?|huevos?|œufs?|eier|uova|cloves?|sticks?|cans?|packets?|pinch|bananas?|apples?|onions?|lemons?|limes?|potatoes|tomatoes)(?![\p{L}\p{N}])/giu;
+const INGREDIENT_HEADING_RE =
+  /(?<![\p{L}\p{N}])(?:ingredients?|recipe|składniki|przepis|ингредиенты|рецепт|інгредієнти|ingredientes|receta|zutaten|rezept|ingrédients|recette|ingredienti|ricetta|ingrediënten|malzemeler|材料|재료)(?![\p{L}\p{N}])/iu;
+/** A list line: a bullet, a numbered item, or a line that opens with a quantity. */
+const LIST_LINE_RE = /(?:^|\n)\s*(?:[•·\-–*]\s*\S|\d+[.)]\s+\S|\d+(?:[.,\/]\d+)?\s*(?:[¼½¾⅓⅔⅛]\s*)?[\p{L}(])/gu;
+
+/**
+ * Cheap, language-agnostic smell test: does this text carry an ingredient
+ * list? Used to decide whether a "no recipe" verdict deserves a retry, so
+ * false positives cost one extra model call and false negatives nothing.
+ */
+export function looksLikeRecipeText(text: string): boolean {
+  const quantities = text.match(QUANTITY_RE)?.length ?? 0;
+  if (quantities >= 2) return true;
+  const listLines = text.match(LIST_LINE_RE)?.length ?? 0;
+  if (listLines >= 4) return true;
+  return INGREDIENT_HEADING_RE.test(text) && listLines >= 2;
 }
 
 /**
@@ -171,21 +262,39 @@ async function callClaude(
     maxTokens?: number;
   },
 ): Promise<any> {
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-api-key': env.ANTHROPIC_API_KEY ?? '',
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model: 'claude-opus-4-8',
-      max_tokens: body.maxTokens ?? 16000,
-      system: body.system,
-      output_config: { format: { type: 'json_schema', schema: body.schema } },
-      messages: body.messages,
-    }),
-  });
+  const request = () =>
+    fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': env.ANTHROPIC_API_KEY ?? '',
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-opus-4-8',
+        max_tokens: body.maxTokens ?? 16000,
+        // Extraction is a deterministic task; sampling at the default
+        // temperature is what lets the same caption get two different verdicts.
+        temperature: 0,
+        system: body.system,
+        output_config: { format: { type: 'json_schema', schema: body.schema } },
+        messages: body.messages,
+      }),
+      signal: AbortSignal.timeout(90000),
+    });
+  let response: Response;
+  try {
+    response = await request();
+  } catch (err) {
+    await new Promise((r) => setTimeout(r, 1500));
+    response = await request(); // one retry on a network-level failure
+  }
+  // Rate limits and overloads clear in seconds — retry once before failing.
+  if (response.status === 429 || response.status === 529 || response.status >= 500) {
+    await response.text().catch(() => '');
+    await new Promise((r) => setTimeout(r, 2000));
+    response = await request();
+  }
   if (!response.ok) {
     const detail = await response.text().catch(() => '');
     throw new Error(`Claude API ${response.status}: ${detail.slice(0, 200)}`);
@@ -538,6 +647,7 @@ function normalize(raw: any): LlmRecipeResult {
     // Ingredients without written steps IS a usable recipe — reels routinely
     // put the ingredient list in the caption and show the method on camera.
     isRecipe: Boolean(raw?.is_recipe) && ingredients.length > 0,
+    modelSaidRecipe: Boolean(raw?.is_recipe),
     dishGuess: (() => {
       const d = str(raw?.dish_guess);
       // A model that echoes filler ("null", "n/a", "unknown") gives us nothing.

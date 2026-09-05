@@ -72,6 +72,12 @@ export interface MetaInfo {
   ogImage: string | null;
   siteName: string | null;
   author: string | null;
+  /**
+   * Facebook/Instagram advertise their oEmbed endpoint with a <link> whose
+   * title attribute carries the FULL caption — on some page variants the
+   * only place it appears (og:title/og:description can be absent or generic).
+   */
+  oembedTitle: string | null;
 }
 
 export function extractMeta(html: string): MetaInfo {
@@ -84,6 +90,7 @@ export function extractMeta(html: string): MetaInfo {
     ogImage: null,
     siteName: null,
     author: null,
+    oembedTitle: null,
   };
 
   const titleMatch = /<title[^>]*>([\s\S]*?)<\/title\s*>/i.exec(html);
@@ -130,7 +137,63 @@ export function extractMeta(html: string): MetaInfo {
     }
   }
 
+  // <link rel="alternate" href="…/oembed_video?url=…" title="full caption">
+  const linkRe = /<link\b[^>]*>/gi;
+  while ((m = linkRe.exec(html)) !== null) {
+    const attrs = parseAttrs(m[0]);
+    const href = attrs['href'] ?? '';
+    const type = attrs['type'] ?? '';
+    if (!/oembed/i.test(href) && !/oembed/i.test(type)) continue;
+    const title = decodeEntities(attrs['title'] ?? '').trim();
+    if (title && out.oembedTitle === null) out.oembedTitle = title;
+  }
+
   return out;
+}
+
+/**
+ * Login walls and "content not found" shells that Facebook/Instagram serve
+ * instead of a post. They still carry og tags — generic ones — so a caption
+ * length check alone would happily hand "Log into Facebook to start sharing…"
+ * to the model. Recognize them so the fetcher can try again another way.
+ */
+const SHELL_TITLE_RE =
+  /^(?:facebook|instagram|error|content not found|log ?in(?:to| or sign up to view)?.*|log into facebook.*|iniciar sesión.*|zaloguj się.*|войти.*|connexion.*|anmelden.*)$/i;
+const SHELL_DESCRIPTION_RE =
+  /^(?:log into facebook to start sharing|see posts, photos and more on facebook|create an account or log in to instagram|see photos and videos from your friends|log in to facebook|facebook helps you connect)/i;
+
+/** True for login-wall / not-found boilerplate masquerading as a caption. */
+export function isShellText(s: string | null | undefined): boolean {
+  const t = (s ?? '').trim();
+  return t.length > 0 && (SHELL_DESCRIPTION_RE.test(t) || SHELL_TITLE_RE.test(t));
+}
+
+export function isPlatformShell(meta: MetaInfo): boolean {
+  const ogTitle = (meta.ogTitle ?? '').trim();
+  const title = (meta.title ?? '').trim();
+  const desc = (meta.ogDescription ?? '').trim();
+  // A real post whose og:title is the caption never matches the generic
+  // titles; the oEmbed caption being present also proves it's a real post.
+  if (meta.oembedTitle && meta.oembedTitle.length >= 40) return false;
+  if (SHELL_DESCRIPTION_RE.test(desc)) return true;
+  if (ogTitle && SHELL_TITLE_RE.test(ogTitle)) return true;
+  if (!ogTitle && title && SHELL_TITLE_RE.test(title)) return true;
+  return false;
+}
+
+/**
+ * The caption a Facebook/Instagram page publishes, taken from whichever
+ * carrier holds the most of it: og:title (~1000 chars on Facebook, wrapped
+ * with the page name), og:description (~200, ellipsis-truncated), or the
+ * oEmbed <link> title (the full caption on variants that drop the og tags).
+ */
+export function bestSocialCaption(meta: MetaInfo): string {
+  const candidates = [
+    meta.ogTitle ? stripInstagramTitlePrefix(stripFacebookTitleSuffix(meta.ogTitle)) : '',
+    meta.ogDescription ? unwrapInstagramDescription(meta.ogDescription) : '',
+    meta.oembedTitle ? stripInstagramTitlePrefix(stripFacebookTitleSuffix(meta.oembedTitle)) : '',
+  ].map((c) => (SHELL_DESCRIPTION_RE.test(c) || SHELL_TITLE_RE.test(c) ? '' : c));
+  return candidates.reduce((best, c) => (c.length > best.length ? c : best), '');
 }
 
 export function htmlToText(html: string, maxLen = 30000): string {

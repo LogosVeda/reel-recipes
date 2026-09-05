@@ -6,6 +6,7 @@ export type Platform =
   | 'tiktok'
   | 'pinterest'
   | 'youtube'
+  | 'twitter'
   | 'web';
 
 export type ExtractionMethod = 'jsonld' | 'caption' | 'paste' | 'image' | 'transcript';
@@ -81,6 +82,35 @@ export interface FetchedContent {
   truncated: boolean;
 }
 
+/** Why the audio path ended without a recipe — reported so clients can decide
+ *  whether their own copy of the video is worth sending. */
+export type AudioOutcome = 'no-video' | 'unfetchable' | 'no-speech' | 'checked' | 'unsupported';
+
+/**
+ * What a phone client gathered on its own. Phones on residential networks are
+ * served pages (YouTube descriptions, throttled Instagram captions) and files
+ * (Facebook og:video) that datacenter fetches never get, so the API accepts
+ * them in place of its own fetch.
+ */
+export interface DeviceInput {
+  /** The page HTML as the phone received it (capped by the route). */
+  html?: string;
+  /** Parsed essentials when HTML alone is not enough (YouTube's player JSON). */
+  page?: {
+    text: string;
+    title?: string | null;
+    author?: string | null;
+    siteName?: string | null;
+    videoUrl?: string | null;
+    imageUrl?: string | null;
+    truncated?: boolean;
+  };
+  /** Spoken words the phone already has. */
+  transcript?: string;
+  /** Audio the phone extracted from the video, for Whisper. */
+  audio?: Uint8Array;
+}
+
 /** Result of the whole extraction pipeline. */
 export type ExtractResult =
   | { ok: true; recipe: Recipe }
@@ -95,6 +125,12 @@ export type ExtractResult =
       dishGuess?: string;
       /** The same dish name in English, for searching Anglo recipe sites */
       dishGuessEn?: string;
+      /** How far the audio check got, so a client holding the video can step in */
+      audio?: AudioOutcome;
+      /** The fetched text plainly lists quantities, yet no model would structure it — offer it for pasting/retry rather than a wrong substitute */
+      captionLooksLikeRecipe?: boolean;
+      /** Cloudflare ray id of the request, so a failure can be matched to its log line */
+      requestId?: string;
     };
 
 export interface Env {

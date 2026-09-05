@@ -157,7 +157,30 @@ const SCRIPT = `
 })();
 `;
 
-function shell(title: string, body: string, lang?: string | null): string {
+/**
+ * schema.org/Recipe for the page, so a Reel Recipes link shared back into the
+ * app (or into any recipe app) extracts exactly, without an LLM pass.
+ */
+function recipeJsonLd(recipe: Recipe, origin: string): string {
+  const iso = (m: number | null): string | undefined => (m !== null && m > 0 ? `PT${m}M` : undefined);
+  const data: Record<string, unknown> = {
+    '@context': 'https://schema.org',
+    '@type': 'Recipe',
+    name: recipe.title,
+    description: recipe.description ?? undefined,
+    author: recipe.source.author ? { '@type': 'Person', name: recipe.source.author } : undefined,
+    recipeYield: recipe.servings !== null ? `${recipe.servings} servings` : undefined,
+    prepTime: iso(recipe.prepMinutes),
+    cookTime: iso(recipe.cookMinutes),
+    totalTime: iso(recipe.totalMinutes),
+    recipeIngredient: recipe.ingredients.map((i) => formatIngredient(i, 1)),
+    recipeInstructions: recipe.steps.map((s) => ({ '@type': 'HowToStep', text: s.text })),
+    url: `${origin}/r/${encodeURIComponent(recipe.id)}`,
+  };
+  return `<script type="application/ld+json">${JSON.stringify(data).replace(/</g, '\\u003c')}</script>`;
+}
+
+function shell(title: string, body: string, lang?: string | null, head = ''): string {
   return `<!doctype html>
 <html lang="${esc(lang && /^[a-z]{2}$/i.test(lang) ? lang.toLowerCase() : 'en')}">
 <head>
@@ -165,6 +188,7 @@ function shell(title: string, body: string, lang?: string | null): string {
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#faf1ce">
 <title>${esc(title)}</title>
+${head}
 <style>${STYLE}</style>
 </head>
 <body>
@@ -313,7 +337,7 @@ ${notes}
 <button class="btn ghost" data-copy="note" data-url="${esc(noteUrl)}" data-share-label="Add to Notes…">Copy note for Apple Notes</button>
 </div>`;
 
-  return shell(recipe.title, body, recipe.language);
+  return shell(recipe.title, body, recipe.language, recipeJsonLd(recipe, origin));
 }
 
 export function renderShoppingListPage(recipe: Recipe, origin: string, factor: number, opts?: RenderOptions): string {

@@ -1,11 +1,11 @@
 // The extraction pipeline: URL → fetch → structured data (JSON-LD) when the
 // site provides it, otherwise caption/description text → LLM structuring.
-import type { Env, ExtractResult, Ingredient, Platform, Recipe, Step } from '../types.js';
+import type { AudioOutcome, DeviceInput, Env, ExtractResult, FetchedContent, Ingredient, Platform, Recipe, Step } from '../types.js';
 import { extractJsonLdRecipe } from './jsonld.js';
 import { looksTruncated } from './html.js';
 import { detectPlatform, fetchContent, fetchImageBytes, fetchVideoBytes, fetchYouTubeTranscript, youTubeVideoId } from './platforms.js';
 import { validateUrl } from './url.js';
-import { bytesToBase64, dishNameInEnglish, llmAvailable, readImageText, sniffImageType, structureRecipeImage, structureRecipeText, transcribeAudio, transcriptionAvailable } from '../llm.js';
+import { bytesToBase64, dishNameInEnglish, llmAvailable, looksLikeRecipeText, readImageText, sniffImageType, structureRecipeImage, structureRecipeText, transcribeAudio, transcriptionAvailable } from '../llm.js';
 import { detectMinutes, parseIngredientLine } from '../scale.js';
 import { newRecipeId, saveRecipe } from '../store.js';
 import { searchWeb, titlesPlausiblyMatch } from './search.js';
@@ -13,6 +13,18 @@ import { searchWeb, titlesPlausiblyMatch } from './search.js';
 export { validateUrl };
 
 const MIN_USEFUL_TEXT = 80; // captions shorter than this never contain a real recipe
+
+/**
+ * The page's declared language (<html lang="en-US"> → "en"). Structured-data
+ * recipes carry no language of their own, and without one every localized
+ * request (a browser's Accept-Language) triggers a needless LLM translation,
+ * even English to English.
+ */
+export function htmlLang(html: string | null): string | null {
+  if (!html) return null;
+  const m = /<html[^>]*\slang\s*=\s*["']?([A-Za-z]{2})(?:[-_][A-Za-z]+)?["'\s>]/i.exec(html.slice(0, 4000));
+  return m ? m[1]!.toLowerCase() : null;
+}
 
 
 /** Human name for a platform, for user-facing copy. */
@@ -23,11 +35,24 @@ function platformName(p: Recipe['source']['platform']): string {
     case 'tiktok': return 'TikTok';
     case 'youtube': return 'YouTube';
     case 'pinterest': return 'Pinterest';
+    case 'twitter': return 'X';
     default: return 'This site';
   }
 }
 
-export async function extractFromUrl(env: Env, input: string): Promise<ExtractResult> {
+/** Per-request limits shared by every step of one extraction. */
+export interface ExtractOptions {
+  /** How many description links deep this extraction already is (0 = the user's own link). */
+  depth?: number;
+  /** Model calls spent so far by this request — one request must never fan out into an unbounded bill. */
+  budget?: { calls: number };
+  /** Cloudflare ray id, echoed in logs and failures so a report can be matched to its log line. */
+  ray?: string;
+}
+const MAX_MODEL_CALLS_PER_REQUEST = 8;
+const MAX_LINK_DEPTH = 1;
+
+export async function extractFromUrl(env: Env, input: string, device?: DeviceInput, opts: ExtractOptions = {}): Promise<ExtractResult> {
   const url = validateUrl(input);
   if (!url) {
     return {
@@ -38,7 +63,57 @@ export async function extractFromUrl(env: Env, input: string): Promise<ExtractRe
   }
 
   const platform = detectPlatform(url.toString());
-  const content = await fetchContent(url.toString(), env);
+  const started = Date.now();
+  const content = await fetchContent(
+    url.toString(),
+    env,
+    device && (device.html || device.page) ? { html: device.html, page: device.page } : undefined,
+  );
+  const settings: Required<Pick<ExtractOptions, 'depth' | 'budget'>> & ExtractOptions = {
+    ...opts,
+    depth: opts.depth ?? 0,
+    budget: opts.budget ?? { calls: 0 },
+  };
+  let result = await extractWithContent(env, url, platform, content, device, settings);
+  if (!result.ok && settings.ray) result = { ...result, requestId: settings.ray };
+  // One structured line per extraction, so a failure can be reconstructed
+  // from Workers Logs after the fact (what was fetched, what each step found)
+  // instead of guessed at from the user's screenshot. Only public,
+  // server-fetched text gets a head — never what a phone or a paste sent.
+  try {
+    console.log(
+      JSON.stringify({
+        evt: 'extract',
+        ray: settings.ray ?? null,
+        depth: settings.depth,
+        modelCalls: settings.budget.calls,
+        platform,
+        host: url.hostname,
+        ms: Date.now() - started,
+        fetched: content
+          ? { chars: content.text.length, video: Boolean(content.videoUrl), image: Boolean(content.imageUrl), truncated: content.truncated, head: device ? undefined : content.text.slice(0, 120) }
+          : null,
+        device: device ? { html: Boolean(device.html), page: Boolean(device.page), transcript: Boolean(device.transcript), audio: Boolean(device.audio) } : null,
+        ok: result.ok,
+        ...(result.ok
+          ? { from: result.recipe.extractedFrom, ingredients: result.recipe.ingredients.length, steps: result.recipe.steps.length }
+          : { code: result.code, audio: result.audio ?? null, dish: result.dishGuess ?? null, message: result.message.slice(0, 160) }),
+      }),
+    );
+  } catch {
+    /* logging must never affect the response */
+  }
+  return result;
+}
+
+async function extractWithContent(
+  env: Env,
+  url: URL,
+  platform: Platform,
+  content: FetchedContent | null,
+  device: DeviceInput | undefined,
+  settings: Required<Pick<ExtractOptions, 'depth' | 'budget'>>,
+): Promise<ExtractResult> {
 
   if (!content) {
     return {
@@ -51,12 +126,25 @@ export async function extractFromUrl(env: Env, input: string): Promise<ExtractRe
     };
   }
 
+  return extractFromContent(env, url, platform, content, device, settings);
+}
+
+/** The pipeline after the page is in hand — the same whether we fetched it or a phone did. */
+async function extractFromContent(
+  env: Env,
+  url: URL,
+  platform: Platform,
+  content: FetchedContent,
+  device: DeviceInput | undefined,
+  settings: Required<Pick<ExtractOptions, 'depth' | 'budget'>>,
+): Promise<ExtractResult> {
   // Path 1: structured recipe data embedded in the page (most food blogs).
   if (content.html) {
     const jsonld = extractJsonLdRecipe(content.html);
     if (jsonld && jsonld.ingredientLines.length > 0 && jsonld.steps.length > 0) {
       const recipe = assembleRecipe(env, {
         title: jsonld.title || content.title || 'Untitled recipe',
+        language: htmlLang(content.html),
         description: jsonld.description,
         servings: jsonld.servings,
         prepMinutes: jsonld.prepMinutes,
@@ -92,15 +180,18 @@ export async function extractFromUrl(env: Env, input: string): Promise<ExtractRe
     extraNotes: content.truncated && looksTruncated(text)
       ? [`${platformName(platform)} cut the description short — check the original post in case final steps are missing.`]
       : [],
+    depth: settings.depth,
+    budget: settings.budget,
   };
 
   if (text.length >= MIN_USEFUL_TEXT) {
     // A visibly truncated caption may be missing its final steps; when the
     // video is available, transcribe FIRST so the spoken version can fill the
     // gap, and only fall back to the caption alone.
+    let spokenAttempt: Awaited<ReturnType<typeof transcribeAndStructure>> | null = null;
     if (content.truncated) {
-      const merged = await transcribeAndStructure(env, content, text, ctx);
-      if (merged.result?.ok) return merged.result;
+      spokenAttempt = await transcribeAndStructure(env, content, text, ctx, device);
+      if (spokenAttempt.result?.ok) return spokenAttempt.result;
     }
     const captionResult = await structureWithLlm(env, text, ctx);
     if (captionResult.ok) {
@@ -108,6 +199,10 @@ export async function extractFromUrl(env: Env, input: string): Promise<ExtractRe
       // can be completed by the video's spoken words, or by the written
       // recipe the description links to.
       if (captionResult.recipe.steps.length === 0) {
+        if ((device?.transcript || device?.audio) && !spokenAttempt) {
+          const heard = await transcribeAndStructure(env, content, text, ctx, device);
+          if (heard.result?.ok && heard.result.recipe.steps.length > 0) return heard.result;
+        }
         const enriched = await youTubeTranscriptAndStructure(env, url.toString(), text, ctx);
         if (enriched.result?.ok && enriched.result.recipe.steps.length > 0) return enriched.result;
         const linked = await tryDescriptionLinks(env, text, ctx);
@@ -116,8 +211,9 @@ export async function extractFromUrl(env: Env, input: string): Promise<ExtractRe
       return captionResult;
     }
     // Caption didn't yield a recipe (teaser text, or even a flaky model reply) —
-    // listen to the video before giving up.
-    const spoken = await transcribeAndStructure(env, content, text, ctx);
+    // listen to the video before giving up (once: the truncated-caption
+    // pre-pass already did exactly this, so reuse its outcome).
+    const spoken = spokenAttempt ?? (await transcribeAndStructure(env, content, text, ctx, device));
     if (spoken.result) return spoken.result;
     const ytSpoken = await youTubeTranscriptAndStructure(env, url.toString(), text, ctx);
     if (ytSpoken.result) return ytSpoken.result;
@@ -126,10 +222,24 @@ export async function extractFromUrl(env: Env, input: string): Promise<ExtractRe
     if (fromLinks) return fromLinks;
     const fromCover = await tryCoverImage(env, content, url.toString());
     if (fromCover) return fromCover;
-    // The post names a dish even though it hides the recipe — find a public
-    // recipe for the same dish rather than returning empty-handed.
     const dish = captionResult.dishGuess ?? spoken.dish ?? ytSpoken.dish ?? null;
     const dishEn = captionResult.dishGuessEn ?? spoken.dishEn ?? ytSpoken.dishEn ?? null;
+    // The caption plainly lists quantities and still no model would structure
+    // it (every retry included). Substituting a stranger's recipe here would
+    // be worse than the failure — hand the text back for a retry or a paste.
+    if (looksLikeRecipeText(text)) {
+      return {
+        ok: false,
+        code: 'no_recipe_found',
+        message: `The caption looks like it contains the recipe, but it couldn't be read reliably just now. Please try again in a moment — or paste the caption text and it will be written up from that.`,
+        fetchedText: text.slice(0, 4000),
+        dishGuess: dish ?? undefined,
+        audio: ytSpoken.audio ?? spoken.audio,
+        captionLooksLikeRecipe: true,
+      };
+    }
+    // The post names a dish even though it hides the recipe — find a public
+    // recipe for the same dish rather than returning empty-handed.
     if (dish) {
       const similar = await findSimilarRecipe(env, dish, url.toString(), PAYWALL_RE.test(text), dishEn);
       if (similar) return similar;
@@ -140,11 +250,12 @@ export async function extractFromUrl(env: Env, input: string): Promise<ExtractRe
       message: noRecipeMessage(platform, text, ytSpoken.audio ?? spoken.audio, false, content.imageUrl !== null, dish),
       fetchedText: text.slice(0, 4000),
       dishGuess: dish ?? undefined,
+      audio: ytSpoken.audio ?? spoken.audio,
     };
   }
 
   // Thin or missing caption: the video may still speak the recipe.
-  const spoken = await transcribeAndStructure(env, content, text, ctx);
+  const spoken = await transcribeAndStructure(env, content, text, ctx, device);
   if (spoken.result) return spoken.result;
   const ytSpoken = await youTubeTranscriptAndStructure(env, url.toString(), text, ctx);
   if (ytSpoken.result) return ytSpoken.result;
@@ -178,6 +289,7 @@ export async function extractFromUrl(env: Env, input: string): Promise<ExtractRe
     message: noRecipeMessage(platform, text, ytSpoken.audio ?? spoken.audio, true, coverScanned, dish),
     fetchedText: text ? text.slice(0, 4000) : undefined,
     dishGuess: dish ?? undefined,
+    audio: ytSpoken.audio ?? spoken.audio,
   };
 }
 
@@ -231,9 +343,12 @@ async function tryDescriptionLinks(
   description: string,
   ctx: LlmContext,
 ): Promise<ExtractResult | null> {
+  // A linked page may itself link onward; one hop is where creators put
+  // their written recipe, anything deeper is a link farm.
+  if ((ctx.depth ?? 0) >= MAX_LINK_DEPTH) return null;
   for (const link of recipeLinksFromText(description)) {
     try {
-      const linked = await extractFromUrl(env, link);
+      const linked = await extractFromUrl(env, link, undefined, { depth: (ctx.depth ?? 0) + 1, budget: ctx.budget });
       // Only a page that yields an actual method is worth swapping in.
       if (linked.ok && linked.recipe.steps.length > 0) {
         const recipe: Recipe = {
@@ -290,6 +405,7 @@ async function findSimilarRecipe(
       const host = new URL(candidate).hostname.replace(/^www\./, '');
       const recipe = assembleRecipe(env, {
         title: jsonld.title || content.title || dish,
+        language: htmlLang(content.html),
         description: jsonld.description,
         servings: jsonld.servings,
         prepMinutes: jsonld.prepMinutes,
@@ -355,9 +471,6 @@ async function tryCoverImage(env: Env, content: { imageUrl: string | null }, _ur
   }
 }
 
-/** Why the audio path ended without a recipe — used to tell the user the truth. */
-type AudioOutcome = 'no-video' | 'unfetchable' | 'no-speech' | 'checked' | 'unsupported';
-
 /**
  * YouTube's audio is unreachable from servers, but its spoken words are
  * available through the youtube-transcript.io API when a token is configured.
@@ -387,7 +500,7 @@ async function youTubeTranscriptAndStructure(
 
 /** Captions that say the recipe lives somewhere else the creator controls. */
 const PAYWALL_RE =
-  /(?:full|complete|whole)\s+recipes?\s+(?:is\s+|are\s+)?(?:on|at|in)\s+(?:my|our|the)\s*(?:web\s?site|site|blog|link)|link\s+in\s+(?:my\s+|our\s+|the\s+)?bio|subscribe\s+to\s+(?:my|our)\s+(?:web\s?site|site|blog|newsletter)|exclusive\s+recipes|(?:free\s+trial|membership|patreon)/i;
+  /(?:full|complete|whole)\s+recipes?\s+(?:is\s+|are\s+)?(?:on|at|in)\s+(?:my|our|the)\s*(?:web\s?site|site|blog|link)|recipes?\s+(?:is\s+|are\s+)?(?:in|via|through|at)\s+(?:the\s+)?link\s+in\s+(?:my\s+|our\s+|the\s+)?bio|link\s+in\s+(?:my\s+|our\s+|the\s+)?bio\s+for\s+(?:the\s+)?(?:full\s+)?recipes?|subscribe\s+to\s+(?:my|our)\s+(?:web\s?site|site|blog|newsletter)|exclusive\s+recipes|(?:free\s+trial|membership|patreon)/i;
 
 /**
  * Honest failure copy: say exactly what was checked and what wasn't, and when
@@ -446,15 +559,27 @@ async function transcribeAndStructure(
   content: { videoUrl: string | null },
   captionText: string,
   ctx: LlmContext,
+  device?: DeviceInput,
 ): Promise<{ result: ExtractResult | null; audio: AudioOutcome; dish?: string | null; dishEn?: string | null }> {
-  // Transcription needs either the Workers AI binding or an HTTP Whisper key —
-  // without one, say so rather than blaming the platform for withholding video.
-  if (!transcriptionAvailable(env)) return { result: null, audio: 'unsupported' };
-  if (!content.videoUrl) return { result: null, audio: 'no-video' };
-  const media = await fetchVideoBytes(content.videoUrl);
-  if (!media) return { result: null, audio: 'unfetchable' };
-  const transcript = await transcribeAudio(env, media);
-  if (!transcript || transcript.length < MIN_USEFUL_TEXT) return { result: null, audio: 'no-speech' };
+  let transcript: string | null = null;
+  if (device?.transcript && device.transcript.length >= MIN_USEFUL_TEXT) {
+    // The phone already has the spoken words (a caption track).
+    transcript = device.transcript;
+  } else if (device?.audio && device.audio.length > 0) {
+    // The phone pulled the audio out of a video only it could reach.
+    if (!transcriptionAvailable(env)) return { result: null, audio: 'unsupported' };
+    transcript = await transcribeAudio(env, device.audio);
+    if (!transcript || transcript.length < MIN_USEFUL_TEXT) return { result: null, audio: 'no-speech' };
+  } else {
+    // Transcription needs either the Workers AI binding or an HTTP Whisper key —
+    // without one, say so rather than blaming the platform for withholding video.
+    if (!transcriptionAvailable(env)) return { result: null, audio: 'unsupported' };
+    if (!content.videoUrl) return { result: null, audio: 'no-video' };
+    const media = await fetchVideoBytes(content.videoUrl);
+    if (!media) return { result: null, audio: 'unfetchable' };
+    transcript = await transcribeAudio(env, media);
+    if (!transcript || transcript.length < MIN_USEFUL_TEXT) return { result: null, audio: 'no-speech' };
+  }
 
   const combined = captionText
     ? `${captionText}\n\nSpoken in the video:\n${transcript}`
@@ -570,6 +695,10 @@ interface LlmContext {
   extractedFrom: 'caption' | 'paste' | 'transcript' | 'image';
   /** Honest caveats to carry into the note (e.g. "description was truncated") */
   extraNotes?: string[];
+  /** Link-following depth of this extraction (see ExtractOptions). */
+  depth?: number;
+  /** Model calls spent by the whole request so far (shared object, see ExtractOptions). */
+  budget?: { calls: number };
 }
 
 async function structureWithLlm(env: Env, text: string, ctx: LlmContext): Promise<ExtractResult> {
@@ -585,6 +714,20 @@ async function structureWithLlm(env: Env, text: string, ctx: LlmContext): Promis
     };
   }
 
+  // Every path through the funnel (caption, transcript, linked page, cover
+  // seed) lands here; the shared counter is what keeps one request's bill
+  // bounded no matter how many fallbacks it walks through.
+  if (ctx.budget) {
+    if (ctx.budget.calls >= MAX_MODEL_CALLS_PER_REQUEST) {
+      return {
+        ok: false,
+        code: 'llm_unavailable',
+        message: 'This link needed more analysis steps than one request allows. Try again in a moment, or paste the recipe text.',
+        fetchedText: text.slice(0, 4000),
+      };
+    }
+    ctx.budget.calls++;
+  }
   let result;
   try {
     result = await structureRecipeText(env, text, ctx.extractedFrom === 'transcript');
@@ -655,6 +798,7 @@ async function structureWithLlm(env: Env, text: string, ctx: LlmContext): Promis
 
 interface AssembleInput {
   title: string;
+  language?: string | null;
   description: string | null;
   servings: number | null;
   prepMinutes: number | null;
@@ -681,6 +825,7 @@ function assembleRecipe(_env: Env, input: AssembleInput): Recipe {
   return {
     id: newRecipeId(),
     title: input.title,
+    language: input.language ?? null,
     description: input.description,
     source: {
       url: input.url,

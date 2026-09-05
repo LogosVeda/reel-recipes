@@ -495,6 +495,11 @@
             if (body.fetchedText && !textInput.value.trim()) {
               textInput.value = body.fetchedText;
             }
+          } else if (body.code === 'no_recipe_found' && body.captionLooksLikeRecipe && body.fetchedText) {
+            // The caption plainly holds the recipe but the model step failed —
+            // hand the text over so a paste finishes the job.
+            setMode('text');
+            if (!textInput.value.trim()) textInput.value = body.fetchedText;
           } else if (body.code === 'no_recipe_found') {
             // The caption and audio are already checked automatically; what's
             // left is what only the user can see — comments, on-screen text.

@@ -1,11 +1,12 @@
 // Reel Recipes — paste/share a reel or recipe link, get a clean, scalable
 // recipe note for Apple Notes with tappable timer and shopping-list links.
 import { Hono } from 'hono';
-import type { Env, Recipe } from './types.js';
+import type { DeviceInput, Env, Recipe } from './types.js';
 import { extractFromImage, extractFromPaste, extractFromUrl } from './extract/index.js';
 import { buildNoteText } from './format/notes.js';
 import { renderRecipePage, renderShoppingListPage } from './format/html.js';
 import { getRecipe, getRecipeInLang } from './store.js';
+import { SUPPORTED_LANGS } from './llm.js';
 import { kvGet, kvPut } from './kv.js';
 
 const app = new Hono<{ Bindings: Env }>();
@@ -111,8 +112,84 @@ async function globallyOverloaded(env: Env): Promise<boolean> {
 
 // --- API ---------------------------------------------------------------
 
-// Main entry point, used by both the web UI and the iOS Shortcut.
-// Body: { url?: string, text?: string, image?: base64 string, servings?: number }
+interface ExtractBody {
+  url?: string;
+  text?: string;
+  image?: string;
+  servings?: number;
+  lang?: string;
+  // Phone clients (the iOS app) may hand over what they fetched themselves.
+  html?: string;
+  page?: DeviceInput['page'];
+  transcript?: string;
+  audio?: string;
+  audioType?: string;
+  client?: string;
+}
+
+const MAX_DEVICE_HTML_CHARS = 1_500_000;
+const MAX_DEVICE_AUDIO_B64 = 22_000_000; // ~16MB decoded — an AAC track of even a long video
+const MAX_DEVICE_TRANSCRIPT = 20_000;
+
+/**
+ * Base64 → bytes without a Node Buffer and without a 3x memory spike: decode
+ * in 4-byte-aligned slices straight into one preallocated array.
+ */
+function base64ToBytes(b64: string): Uint8Array | null {
+  const clean = b64.replace(/[\s]/g, '');
+  if (clean.length === 0 || clean.length % 4 !== 0 || /[^A-Za-z0-9+/=]/.test(clean)) return null;
+  const padding = clean.endsWith('==') ? 2 : clean.endsWith('=') ? 1 : 0;
+  const out = new Uint8Array((clean.length / 4) * 3 - padding);
+  const SLICE = 1_048_576; // multiple of 4
+  let offset = 0;
+  try {
+    for (let i = 0; i < clean.length; i += SLICE) {
+      const bin = atob(clean.slice(i, i + SLICE));
+      for (let j = 0; j < bin.length; j++) out[offset + j] = bin.charCodeAt(j);
+      offset += bin.length;
+    }
+  } catch {
+    return null;
+  }
+  return offset === out.length ? out : out.slice(0, offset);
+}
+
+/** Validate and shape the phone-gathered fields; undefined when there are none. */
+function deviceInput(body: ExtractBody): DeviceInput | undefined {
+  const html = typeof body.html === 'string' && body.html.length > 200 ? body.html.slice(0, MAX_DEVICE_HTML_CHARS) : undefined;
+  const rawPage = body.page;
+  const page =
+    rawPage && typeof rawPage === 'object' && typeof rawPage.text === 'string' && rawPage.text.trim().length > 0
+      ? {
+          text: rawPage.text.slice(0, 40_000),
+          title: typeof rawPage.title === 'string' ? rawPage.title : null,
+          author: typeof rawPage.author === 'string' ? rawPage.author : null,
+          siteName: typeof rawPage.siteName === 'string' ? rawPage.siteName : null,
+          videoUrl: typeof rawPage.videoUrl === 'string' ? rawPage.videoUrl : null,
+          imageUrl: typeof rawPage.imageUrl === 'string' ? rawPage.imageUrl : null,
+          truncated: rawPage.truncated === true,
+        }
+      : undefined;
+  const transcript =
+    typeof body.transcript === 'string' && body.transcript.trim().length > 0
+      ? body.transcript.slice(0, MAX_DEVICE_TRANSCRIPT)
+      : undefined;
+  let audio: Uint8Array | undefined;
+  if (typeof body.audio === 'string' && body.audio.length > 0 && body.audio.length <= MAX_DEVICE_AUDIO_B64) {
+    const decoded = base64ToBytes(body.audio.replace(/^data:[^;]+;base64,/, ''));
+    if (decoded && decoded.length > 0) audio = decoded;
+  } else if (typeof body.audio === 'string' && body.audio.length > MAX_DEVICE_AUDIO_B64) {
+    // Silent drops are how a phone ends up hearing "the platform withheld
+    // the video" after it just uploaded the audio — leave a trace.
+    console.log(JSON.stringify({ evt: 'device_audio_too_large', chars: body.audio.length }));
+  }
+  if (!html && !page && !transcript && !audio) return undefined;
+  return { html, page, transcript, audio };
+}
+
+// Main entry point, used by the web UI, the iOS Shortcut and the iOS app.
+// Body: { url?, text?, image?: base64, servings?, lang?,
+//         html?, page?, transcript?, audio?: base64 }   (phone-gathered extras)
 app.post('/api/extract', async (c) => {
   const ip = c.req.header('cf-connecting-ip') ?? c.req.header('x-forwarded-for') ?? 'unknown';
   if (rateLimited(ip)) {
@@ -127,7 +204,7 @@ app.post('/api/extract', async (c) => {
       429,
     );
   }
-  let body: { url?: string; text?: string; image?: string; servings?: number };
+  let body: ExtractBody;
   try {
     body = await c.req.json();
   } catch {
@@ -143,7 +220,7 @@ app.post('/api/extract', async (c) => {
     : text
       ? await extractFromPaste(c.env, text, url || undefined)
       : url
-        ? await extractFromUrl(c.env, url)
+        ? await extractFromUrl(c.env, url, deviceInput(body), { ray: c.req.header('cf-ray') ?? undefined })
         : null;
 
   if (!result) {
@@ -172,11 +249,19 @@ app.post('/api/extract', async (c) => {
   });
 });
 
+// ?lang=xx returns the recipe translated (cached in KV); no ?lang, or
+// ?lang=orig, returns it exactly as stored. The iOS app's per-recipe
+// language switch lives on this.
 app.get('/api/recipe/:id', async (c) => {
   const recipe = await getRecipe(c.env, c.req.param('id'));
   if (!recipe) return c.json({ ok: false, message: 'Recipe not found' }, 404);
-  return c.json({ ok: true, recipe });
+  const q = (c.req.query('lang') ?? '').toLowerCase();
+  const localized = /^[a-z]{2}$/.test(q) ? await getRecipeInLang(c.env, recipe, q) : recipe;
+  return c.json({ ok: true, recipe: localized, language: localized.language ?? recipe.language ?? null });
 });
+
+// The languages translateRecipe can produce, for clients that offer a picker.
+app.get('/api/languages', (c) => c.json({ ok: true, languages: SUPPORTED_LANGS }));
 
 // Plain-text note (used by the Shortcut when re-scaling: ?servings=6 or ?x=2)
 app.get('/api/recipe/:id/note', async (c) => {

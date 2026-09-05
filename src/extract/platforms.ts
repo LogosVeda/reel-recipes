@@ -1,7 +1,7 @@
 // Platform detection and network adapters. Runs on Cloudflare Workers (fetch only).
 
 import type { FetchedContent, Platform } from '../types.js';
-import { extractMeta, htmlToText, looksTruncated, stripFacebookTitleSuffix, stripInstagramTitlePrefix, unwrapInstagramDescription } from './html.js';
+import { bestSocialCaption, extractMeta, htmlToText, isPlatformShell, isShellText, looksTruncated } from './html.js';
 import { validateUrl } from './url.js';
 
 export function detectPlatform(url: string): Platform {
@@ -31,8 +31,40 @@ export function detectPlatform(url: string): Platform {
   if (host === 'youtube.com' || host.endsWith('.youtube.com') || host === 'youtu.be') {
     return 'youtube';
   }
+  if (host === 'x.com' || host === 'twitter.com' || host.endsWith('.x.com') || host.endsWith('.twitter.com')) {
+    return 'twitter';
+  }
   return 'web';
 }
+
+/** HTML a phone client already fetched, standing in for our own request. */
+export interface Prefetched {
+  html?: string;
+  page?: {
+    text: string;
+    title?: string | null;
+    author?: string | null;
+    siteName?: string | null;
+    videoUrl?: string | null;
+    imageUrl?: string | null;
+    truncated?: boolean;
+  };
+}
+
+/** The page: the client's copy when it sent one, otherwise our own fetch. */
+async function pageFor(url: string, pre?: Prefetched): Promise<FetchedPage | null> {
+  if (pre?.html && pre.html.length > 0) return { ok: true, status: 200, text: pre.html };
+  return fetchPage(url);
+}
+
+/**
+ * A non-browser signature. Facebook answers it with its crawler-facing page:
+ * the same og caption (often a little more of it) but no og:video — so it is
+ * the second look, never the first. Measured 2026-09 from Cloudflare's IPs.
+ */
+const PLAIN_USER_AGENT = 'ReelRecipes/1.0 (+https://github.com/LogosVeda/reel-recipes)';
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 const USER_AGENT =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 ' +
@@ -73,7 +105,7 @@ async function readCapped(res: Response): Promise<string> {
   return out;
 }
 
-async function fetchPage(url: string): Promise<FetchedPage | null> {
+async function fetchPage(url: string, opts: { userAgent?: string } = {}): Promise<FetchedPage | null> {
   // Follow redirects manually so each hop is re-validated — a vetted public URL
   // must not be able to bounce us to localhost / a metadata endpoint / odd port.
   let current = url;
@@ -81,7 +113,7 @@ async function fetchPage(url: string): Promise<FetchedPage | null> {
     for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
       if (!validateUrl(current)) return null;
       const res = await fetch(current, {
-        headers: { 'User-Agent': USER_AGENT, 'Accept-Language': 'en' },
+        headers: { 'User-Agent': opts.userAgent ?? USER_AGENT, 'Accept-Language': 'en' },
         redirect: 'manual',
         signal: AbortSignal.timeout(10000),
       });
@@ -278,32 +310,155 @@ function asString(v: unknown): string | null {
   return typeof v === 'string' && v.length > 0 ? v : null;
 }
 
-export async function fetchContent(url: string, env?: { YOUTUBE_API_KEY?: string }): Promise<FetchedContent | null> {
+export async function fetchContent(
+  url: string,
+  env?: { YOUTUBE_API_KEY?: string },
+  pre?: Prefetched,
+): Promise<FetchedContent | null> {
   const platform = detectPlatform(url);
+  let content: FetchedContent | null;
   switch (platform) {
     case 'tiktok':
-      return fetchTikTok(url);
+      content = await fetchTikTok(url, pre);
+      break;
     case 'youtube':
-      return fetchYouTube(url, env?.YOUTUBE_API_KEY);
+      content = await fetchYouTube(url, env?.YOUTUBE_API_KEY, pre);
+      break;
     case 'instagram':
-      return fetchInstagramOrFacebook(url, 'instagram');
+      content = await fetchInstagramOrFacebook(url, 'instagram', pre);
+      break;
     case 'facebook':
-      return fetchInstagramOrFacebook(url, 'facebook');
+      content = await fetchInstagramOrFacebook(url, 'facebook', pre);
+      break;
     case 'pinterest':
-      return fetchPinterest(url);
+      content = await fetchPinterest(url, pre);
+      break;
+    case 'twitter':
+      content = await fetchTwitter(url);
+      break;
     default:
-      return fetchWeb(url);
+      content = await fetchWeb(url, pre);
+  }
+  // Whatever the phone parsed itself fills the gaps in (or replaces) what
+  // the adapter found — a phone's YouTube description beats a bare title.
+  const page = pre?.page;
+  // A phone's logged-out session is served login walls too; their boilerplate
+  // ("Log into Facebook to start sharing…") must never stand in for a caption.
+  if (page && typeof page.text === 'string' && !isShellText(page.text)) {
+    if (!content) {
+      content = {
+        platform,
+        text: page.text,
+        title: page.title ?? null,
+        author: page.author ?? null,
+        siteName: page.siteName ?? null,
+        html: pre?.html ?? null,
+        videoUrl: page.videoUrl ?? null,
+        imageUrl: page.imageUrl ?? null,
+        truncated: page.truncated === true,
+      };
+    } else {
+      if (page.text.length > content.text.length) content.text = page.text;
+      content.title = content.title ?? page.title ?? null;
+      content.author = content.author ?? page.author ?? null;
+      content.siteName = content.siteName ?? page.siteName ?? null;
+      content.videoUrl = content.videoUrl ?? page.videoUrl ?? null;
+      content.imageUrl = content.imageUrl ?? page.imageUrl ?? null;
+    }
+  }
+  return content;
+}
+
+/**
+ * Whisper only needs the audio, so the lightest MP4 rendition is the right
+ * one to download — a 4K vertical video blows past our size cap while its
+ * 320px sibling is a few MB. FixTweet lists renditions under `variants`.
+ */
+function smallestMp4(video: Record<string, unknown> | undefined): string | null {
+  if (!video) return null;
+  const variants = (video['variants'] as Array<Record<string, unknown>> | undefined) ?? [];
+  let best: { url: string; bitrate: number } | null = null;
+  for (const v of variants) {
+    const url = asString(v['url']);
+    const type = asString(v['content_type']) ?? '';
+    const bitrate = Number(v['bitrate']);
+    if (!url || !type.includes('mp4') || !Number.isFinite(bitrate) || bitrate <= 0) continue;
+    if (!best || bitrate < best.bitrate) best = { url, bitrate };
+  }
+  return best?.url ?? asString(video['url']);
+}
+
+/** Status id from x.com/twitter.com/<user>/status/<id> (and /i/status/<id>). */
+export function tweetId(url: string): string | null {
+  try {
+    const m = /\/status(?:es)?\/(\d{5,25})/.exec(new URL(url).pathname);
+    return m ? m[1]! : null;
+  } catch {
+    return null;
   }
 }
 
-async function fetchTikTok(url: string): Promise<FetchedContent | null> {
+/**
+ * X publishes nothing to logged-out fetches, but two long-running open-source
+ * services (FixTweet and vxTwitter) expose a post's text, author and media as
+ * plain JSON. Try FixTweet first, vxTwitter as the fallback.
+ */
+async function fetchTwitter(url: string): Promise<FetchedContent | null> {
+  const id = tweetId(url);
+  if (!id) return null;
+
+  const fx = await fetchJson(`https://api.fxtwitter.com/status/${id}`);
+  const tweet = fx?.['tweet'] as Record<string, unknown> | undefined;
+  if (tweet && typeof tweet['text'] === 'string') {
+    const author = tweet['author'] as Record<string, unknown> | undefined;
+    const media = tweet['media'] as Record<string, unknown> | undefined;
+    const videos = (media?.['videos'] as Array<Record<string, unknown>> | undefined) ?? [];
+    const photos = (media?.['photos'] as Array<Record<string, unknown>> | undefined) ?? [];
+    const name = asString(author?.['name']);
+    const handle = asString(author?.['screen_name']);
+    return {
+      platform: 'twitter',
+      text: tweet['text'] as string,
+      title: null,
+      author: name ? (handle ? `${name} (@${handle})` : name) : handle ? `@${handle}` : null,
+      siteName: 'X',
+      html: null,
+      videoUrl: smallestMp4(videos[0]),
+      imageUrl: asString(videos[0]?.['thumbnail_url']) ?? asString(photos[0]?.['url']),
+      truncated: false,
+    };
+  }
+
+  const vx = await fetchJson(`https://api.vxtwitter.com/i/status/${id}`);
+  if (vx && typeof vx['text'] === 'string') {
+    const media = (vx['media_extended'] as Array<Record<string, unknown>> | undefined) ?? [];
+    const video = media.find((m) => m['type'] === 'video' || m['type'] === 'gif');
+    const image = media.find((m) => m['type'] === 'image');
+    const name = asString(vx['user_name']);
+    const handle = asString(vx['user_screen_name']);
+    return {
+      platform: 'twitter',
+      text: vx['text'] as string,
+      title: null,
+      author: name ? (handle ? `${name} (@${handle})` : name) : handle ? `@${handle}` : null,
+      siteName: 'X',
+      html: null,
+      videoUrl: asString(video?.['url']),
+      imageUrl: asString(video?.['thumbnail_url']) ?? asString(image?.['url']),
+      truncated: false,
+    };
+  }
+  return null;
+}
+
+async function fetchTikTok(url: string, pre?: Prefetched): Promise<FetchedContent | null> {
   const oembed = await fetchJson(
     'https://www.tiktok.com/oembed?url=' + encodeURIComponent(url)
   );
   const caption = asString(oembed?.['title']);
   const oembedAuthor = asString(oembed?.['author_name']);
 
-  const page = await fetchPage(url);
+  const page = await pageFor(url, pre);
   const html = page && page.ok ? page.text : null;
 
   let text = caption ?? '';
@@ -352,7 +507,7 @@ export function youTubeVideoId(url: string): string | null {
   }
 }
 
-async function fetchYouTube(url: string, apiKey?: string): Promise<FetchedContent | null> {
+async function fetchYouTube(url: string, apiKey?: string, pre?: Prefetched): Promise<FetchedContent | null> {
   const oembed = await fetchJson(
     'https://www.youtube.com/oembed?url=' + encodeURIComponent(url) + '&format=json'
   );
@@ -381,7 +536,7 @@ async function fetchYouTube(url: string, apiKey?: string): Promise<FetchedConten
 
   // Try the page anyway — it works from residential IPs (local dev) and, when
   // it answers, may carry more than the API (or fill in for a missing key).
-  const page = await fetchPage(url);
+  const page = await pageFor(url, pre);
   const html = page && page.ok ? page.text : null;
   if (html) {
     if (!description) description = extractYouTubeDescription(html) ?? '';
@@ -397,50 +552,111 @@ async function fetchYouTube(url: string, apiKey?: string): Promise<FetchedConten
   return { platform: 'youtube', text, title, author, siteName: 'YouTube', html, videoUrl: html ? extractMeta(html).ogVideo : null, imageUrl, truncated: false };
 }
 
+/** One look at a Facebook/Instagram page, reduced to what the pipeline needs. */
+interface SocialLook {
+  html: string;
+  caption: string;
+  shell: boolean;
+  videoUrl: string | null;
+  imageUrl: string | null;
+  ogDescription: string;
+  title: string | null;
+  author: string | null;
+  siteName: string | null;
+}
+
+function lookAt(html: string): SocialLook {
+  const meta = extractMeta(html);
+  return {
+    html,
+    caption: bestSocialCaption(meta),
+    shell: isPlatformShell(meta),
+    videoUrl: meta.ogVideo,
+    imageUrl: meta.ogImage,
+    ogDescription: meta.ogDescription ?? '',
+    title: meta.ogTitle ?? meta.title,
+    author: meta.author,
+    siteName: meta.siteName,
+  };
+}
+
+/** A caption shorter than this is a teaser or a truncation — worth a second look. */
+const THIN_SOCIAL_CAPTION = 200;
+
+/**
+ * Facebook and Instagram serve several variants of a post page, and not all
+ * of them carry everything: the browser-facing one has og:video but has been
+ * seen without a caption; the crawler-facing one has the caption but no
+ * video; login walls have neither. One fetch is therefore not enough to say
+ * "the caption isn't written". Take up to three looks and merge them — the
+ * longest caption, the first video, the first image — so a single thin or
+ * generic response can never be mistaken for the post itself.
+ */
 async function fetchInstagramOrFacebook(
   url: string,
-  platform: 'instagram' | 'facebook'
+  platform: 'instagram' | 'facebook',
+  pre?: Prefetched,
 ): Promise<FetchedContent | null> {
-  const page = await fetchPage(url);
-  if (!page || !page.ok) return null;
-  const html = page.text;
-  const meta = extractMeta(html);
+  const looks: SocialLook[] = [];
+  const first = await pageFor(url, pre);
+  if (first?.ok) looks.push(lookAt(first.text));
 
-  const rawDescription = meta.ogDescription ?? '';
-  const fromDescription = unwrapInstagramDescription(rawDescription);
-  // FB's og:title usually carries ~4x more of the caption than og:description.
-  // Both wrappers are platform-specific and mutually exclusive, so applying
-  // the pair is safe regardless of which platform this post came from.
-  const fromTitle = meta.ogTitle ? stripInstagramTitlePrefix(stripFacebookTitleSuffix(meta.ogTitle)) : '';
-  const caption = fromTitle.length > fromDescription.length ? fromTitle : fromDescription;
-  // og:description ending in an ellipsis is FB's own truncation marker; a
-  // title-sourced caption that ends mid-word (no closing punctuation) is the
-  // same thing happening to og:title.
-  const truncated =
-    looksTruncated(rawDescription) &&
-    (caption === fromDescription || !/[.!?)»”"]\s*$/.test(caption));
+  const merged = () => ({
+    caption: looks.reduce((best, l) => (l.caption.length > best.length ? l.caption : best), ''),
+    videoUrl: looks.find((l) => l.videoUrl)?.videoUrl ?? null,
+    imageUrl: looks.find((l) => l.imageUrl)?.imageUrl ?? null,
+    shell: looks.length === 0 || looks.every((l) => l.shell),
+  });
 
+  // Second look: the crawler-facing variant, whenever the first one came
+  // back thin, generic, or not at all.
+  let state = merged();
+  if (state.shell || state.caption.length < THIN_SOCIAL_CAPTION) {
+    const second = await fetchPage(url, { userAgent: PLAIN_USER_AGENT });
+    if (second?.ok) looks.push(lookAt(second.text));
+    state = merged();
+  }
+  // Third look: the browser variant once more after a beat — a transient
+  // shell (rate-limit, checkpoint) usually clears on the next request.
+  if (state.shell || (state.caption.length < 40 && !state.videoUrl && !state.imageUrl)) {
+    await sleep(700);
+    const third = await fetchPage(url);
+    if (third?.ok) looks.push(lookAt(third.text));
+    state = merged();
+  }
+
+  if (looks.length === 0) return null;
   // Too short usually means a login wall or an empty caption — but if the page
   // still publishes its og:video, return what we have so the caller can try
   // transcription instead of giving up.
-  if (caption.length < 40 && !meta.ogVideo && !meta.ogImage) return null;
+  if (state.shell && !state.videoUrl && !state.imageUrl) return null;
+  if (state.caption.length < 40 && !state.videoUrl && !state.imageUrl) return null;
+
+  const best = looks.reduce((a, l) => (l.caption.length > a.caption.length ? l : a), looks[0]!);
+  const caption = state.caption;
+  // og:description ending in an ellipsis is the platform's own truncation
+  // marker; a caption that ends mid-word (no closing punctuation) is the same
+  // thing happening to the longer carrier.
+  const truncated =
+    looksTruncated(best.ogDescription) &&
+    (caption.length <= best.ogDescription.length || !/[.!?)»”"]\s*$/.test(caption));
 
   const fallbackSite = platform === 'instagram' ? 'Instagram' : 'Facebook';
   return {
     platform,
     text: caption,
-    title: meta.ogTitle ?? meta.title,
-    author: meta.author,
-    siteName: meta.siteName ?? fallbackSite,
-    html,
-    videoUrl: meta.ogVideo,
-    imageUrl: meta.ogImage,
+    title: best.title,
+    author: best.author,
+    siteName: best.siteName ?? fallbackSite,
+    html: best.html,
+    videoUrl: state.videoUrl,
+    imageUrl: state.imageUrl,
     truncated,
   };
 }
 
-async function fetchPinterest(url: string): Promise<FetchedContent | null> {
-  const page = await fetchPage(url);
+async function fetchPinterest(url: string, pre?: Prefetched): Promise<FetchedContent | null> {
+  const page = await pageFor(url, pre);
   if (!page || !page.ok) return null;
   const html = page.text;
   const meta = extractMeta(html);
@@ -464,8 +680,8 @@ async function fetchPinterest(url: string): Promise<FetchedContent | null> {
   };
 }
 
-async function fetchWeb(url: string): Promise<FetchedContent | null> {
-  const page = await fetchPage(url);
+async function fetchWeb(url: string, pre?: Prefetched): Promise<FetchedContent | null> {
+  const page = await pageFor(url, pre);
   if (!page || !page.ok) return null;
   const html = page.text;
   const meta = extractMeta(html);
