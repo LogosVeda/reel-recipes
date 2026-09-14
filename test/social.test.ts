@@ -172,3 +172,25 @@ describe('spoken-recipe quality gate', async () => {
     expect(COMMENTS_HINT_RE.test('Fluffy cheesecake 😍')).toBe(false);
   });
 });
+
+describe('normalize: split ingredient lines are not repeated', async () => {
+  const { normalizeModelRecipe } = await import('../src/llm');
+  const base = { is_recipe: true, dish_guess: null, dish_guess_en: null, title: 'Cheesecake', language: 'en', description: null, servings: null, prep_minutes: null, cook_minutes: null, total_minutes: null, steps: [], notes: [] };
+  it('gives each entry its own part when the model repeated the whole line', () => {
+    const r = normalizeModelRecipe({ ...base, ingredients: [
+      { raw: '5 egg yolks, 5 egg whites', qty: 5, qty_high: null, unit: null, item: 'egg yolks', note: null, group: null },
+      { raw: '5 egg yolks, 5 egg whites', qty: 5, qty_high: null, unit: null, item: 'egg whites', note: null, group: null },
+      { raw: '1/4 cup flour + 2tbsp cornstarch', qty: 0.25, qty_high: null, unit: 'cup', item: 'flour', note: null, group: null },
+      { raw: '1/4 cup flour + 2tbsp cornstarch', qty: 2, qty_high: null, unit: 'tbsp', item: 'cornstarch', note: null, group: null },
+      { raw: '3/4 cup sugar', qty: 0.75, qty_high: null, unit: 'cup', item: 'sugar', note: null, group: null },
+    ] });
+    expect(r.ingredients.map((i) => i.raw)).toEqual(['5 egg yolks', '5 egg whites', '1/4 cup flour', '2 tbsp cornstarch', '3/4 cup sugar']);
+  });
+  it('drops true duplicates', () => {
+    const r = normalizeModelRecipe({ ...base, ingredients: [
+      { raw: '2 eggs', qty: 2, qty_high: null, unit: null, item: 'eggs', note: null, group: null },
+      { raw: '2 eggs', qty: 2, qty_high: null, unit: null, item: 'eggs', note: null, group: null },
+    ] });
+    expect(r.ingredients.length).toBe(1);
+  });
+});

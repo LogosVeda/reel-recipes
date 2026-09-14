@@ -80,6 +80,10 @@ export interface FetchedContent {
   imageUrl: string | null;
   /** True when the platform visibly cut the caption off (ellipsis) — more text exists at the source */
   truncated: boolean;
+  /** Provenance worth telling the user (e.g. "recipe taken from the creator's comment") */
+  sourceNotes?: string[];
+  /** The caption points at the comments, and the platform failed to serve them on this request (transient) */
+  commentsUnavailable?: boolean;
 }
 
 /** Why the audio path ended without a recipe — reported so clients can decide

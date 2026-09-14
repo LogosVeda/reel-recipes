@@ -93,6 +93,7 @@ describe('extractMeta', () => {
       ogImage: null,
       siteName: null,
       author: null,
+      ogUrl: null,
       oembedTitle: null,
     });
   });

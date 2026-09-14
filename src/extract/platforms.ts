@@ -1,8 +1,10 @@
 // Platform detection and network adapters. Runs on Cloudflare Workers (fetch only).
 
 import type { FetchedContent, Platform } from '../types.js';
-import { bestSocialCaption, extractMeta, htmlToText, isPlatformShell, isShellText, looksTruncated } from './html.js';
+import { COMMENTS_HINT_RE, bestSocialCaption, extractMeta, htmlToText, isPlatformShell, isShellText, looksTruncated } from './html.js';
 import { validateUrl } from './url.js';
+import { facebookVideoId, facebookVideoOwner, parseFacebookComments, pickRecipeComment } from './facebook.js';
+import { looksLikeRecipeText } from '../llm.js';
 
 export function detectPlatform(url: string): Platform {
   let host: string;
@@ -66,6 +68,53 @@ const PLAIN_USER_AGENT = 'ReelRecipes/1.0 (+https://github.com/LogosVeda/reel-re
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/**
+ * What a desktop browser sends. Facebook's classic video page only renders
+ * its comments for a request that looks like a real navigation — the same
+ * page a logged-out visitor gets — and answers a bare desktop User-Agent
+ * with HTTP 400.
+ */
+const DESKTOP_USER_AGENT =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36';
+const BROWSER_HEADERS: Record<string, string> = {
+  Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'Sec-Fetch-Dest': 'document',
+  'Sec-Fetch-Mode': 'navigate',
+  'Sec-Fetch-Site': 'none',
+  'Upgrade-Insecure-Requests': '1',
+};
+
+/**
+ * The written recipe a creator posted as a comment on their own video.
+ * Facebook serves the top comments inside facebook.com/watch/?v=<id> (it
+ * redirects to the owner's /videos/<id>/ page) to any visitor; the reel
+ * URL the user shares never carries them. Returns null when there is no
+ * comment that reads like a recipe.
+ */
+export async function fetchFacebookCommentRecipe(
+  videoId: string,
+): Promise<{ text: string; author: string | null; byOwner: boolean; links: string[] } | { unavailable: true } | null> {
+  const url = `https://www.facebook.com/watch/?v=${videoId}`;
+  const opts = { userAgent: DESKTOP_USER_AGENT, headers: BROWSER_HEADERS, maxChars: 3_000_000 };
+  // Facebook occasionally answers with a 13 KB stub or drops the stream —
+  // seen once in seven live requests. A stub carries no comment payload at
+  // all, so it is unambiguous; wait a beat and ask again before concluding.
+  let page: FetchedPage | null = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await sleep(900 * attempt);
+    page = await fetchPage(url, opts).catch(() => null);
+    if (page?.ok && page.text.length > 200_000) break; // a full page, with or without comments
+  }
+  if (!page?.ok || page.text.length <= 200_000) return { unavailable: true };
+  const comments = parseFacebookComments(page.text);
+  if (comments.length === 0) return null;
+  const owner = facebookVideoOwner(page.text);
+  const pick = pickRecipeComment(comments, owner, looksLikeRecipeText);
+  if (!pick) return null;
+  return { text: pick.text, author: pick.author, byOwner: pick.byOwner, links: pick.links };
+}
+
 const USER_AGENT =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 ' +
   '(KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
@@ -82,7 +131,7 @@ interface FetchedPage {
 
 // Read the body incrementally and stop at the cap, so a hostile server can't
 // stream hundreds of MB into memory before we truncate.
-async function readCapped(res: Response): Promise<string> {
+async function readCapped(res: Response, maxChars = MAX_BODY_CHARS): Promise<string> {
   const body = res.body;
   if (!body) return '';
   const reader = body.getReader();
@@ -93,8 +142,8 @@ async function readCapped(res: Response): Promise<string> {
       const { done, value } = await reader.read();
       if (done) break;
       out += decoder.decode(value, { stream: true });
-      if (out.length >= MAX_BODY_CHARS) {
-        out = out.slice(0, MAX_BODY_CHARS);
+      if (out.length >= maxChars) {
+        out = out.slice(0, maxChars);
         await reader.cancel().catch(() => {});
         break;
       }
@@ -105,7 +154,10 @@ async function readCapped(res: Response): Promise<string> {
   return out;
 }
 
-async function fetchPage(url: string, opts: { userAgent?: string } = {}): Promise<FetchedPage | null> {
+async function fetchPage(
+  url: string,
+  opts: { userAgent?: string; headers?: Record<string, string>; maxChars?: number } = {},
+): Promise<FetchedPage | null> {
   // Follow redirects manually so each hop is re-validated — a vetted public URL
   // must not be able to bounce us to localhost / a metadata endpoint / odd port.
   let current = url;
@@ -113,7 +165,7 @@ async function fetchPage(url: string, opts: { userAgent?: string } = {}): Promis
     for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
       if (!validateUrl(current)) return null;
       const res = await fetch(current, {
-        headers: { 'User-Agent': opts.userAgent ?? USER_AGENT, 'Accept-Language': 'en' },
+        headers: { 'User-Agent': opts.userAgent ?? USER_AGENT, 'Accept-Language': 'en', ...(opts.headers ?? {}) },
         redirect: 'manual',
         signal: AbortSignal.timeout(10000),
       });
@@ -131,7 +183,7 @@ async function fetchPage(url: string, opts: { userAgent?: string } = {}): Promis
       if (Number.isFinite(contentLength) && contentLength > 16_000_000) {
         return { ok: false, status: res.status, text: '' };
       }
-      const text = await readCapped(res);
+      const text = await readCapped(res, opts.maxChars);
       return { ok: res.ok, status: res.status, text };
     }
     return null; // too many redirects
@@ -560,6 +612,7 @@ interface SocialLook {
   videoUrl: string | null;
   imageUrl: string | null;
   ogDescription: string;
+  ogUrl: string | null;
   title: string | null;
   author: string | null;
   siteName: string | null;
@@ -574,6 +627,7 @@ function lookAt(html: string): SocialLook {
     videoUrl: meta.ogVideo,
     imageUrl: meta.ogImage,
     ogDescription: meta.ogDescription ?? '',
+    ogUrl: meta.ogUrl,
     title: meta.ogTitle ?? meta.title,
     author: meta.author,
     siteName: meta.siteName,
@@ -633,25 +687,63 @@ async function fetchInstagramOrFacebook(
   if (state.caption.length < 40 && !state.videoUrl && !state.imageUrl) return null;
 
   const best = looks.reduce((a, l) => (l.caption.length > a.caption.length ? l : a), looks[0]!);
-  const caption = state.caption;
-  // og:description ending in an ellipsis is the platform's own truncation
-  // marker; a caption that ends mid-word (no closing punctuation) is the same
-  // thing happening to the longer carrier.
-  const truncated =
+  let caption = state.caption;
+  const sourceNotes: string[] = [];
+  let author = best.author;
+  let commentsUnavailable = false;
+  // Truncation is judged on the platform's own caption, before anything is
+  // appended: og:description ending in "…" while the longer carrier ends
+  // mid-word means the caption itself was cut.
+  let truncated =
     looksTruncated(best.ogDescription) &&
     (caption.length <= best.ogDescription.length || !/[.!?)»”"]\s*$/.test(caption));
+  // Facebook: the caption is often a teaser and the recipe the creator's own
+  // comment. That comment is public (rendered for logged-out visitors of the
+  // video page). Read it unless the caption is unmistakably the full recipe.
+  const captionHasRecipe = looksLikeRecipeText(caption);
+  const hintsComments = COMMENTS_HINT_RE.test(caption);
+  if (platform === 'facebook' && (!captionHasRecipe || caption.length < 400 || hintsComments)) {
+    const videoId = facebookVideoId(url) ?? looks.map((l) => (l.ogUrl ? facebookVideoId(l.ogUrl) : null)).find(Boolean) ?? null;
+    if (videoId) {
+      const comment = await fetchFacebookCommentRecipe(videoId).catch(() => null);
+      if (comment && 'unavailable' in comment) {
+        commentsUnavailable = hintsComments || !captionHasRecipe;
+      } else if (comment) {
+        // A commenter's text must never steer link-following: only the
+        // creator's own links are followed, as their own line.
+        const body = comment.text.replace(/https?:\/\/\S+/g, '').replace(/[ \t]+\n/g, '\n').trim();
+        const accept = comment.byOwner ? body.length > 0 && !caption.includes(body.slice(0, 80)) : body.length > 0 && !captionHasRecipe;
+        if (accept) {
+          const who = comment.byOwner ? 'the creator' : comment.author ? `${comment.author}` : 'a commenter';
+          caption = `${caption}\n\nRecipe posted by ${who} in the comments:\n${body}`.trim();
+          truncated = false; // the written recipe is complete as posted
+          sourceNotes.push(
+            comment.byOwner
+              ? 'Recipe taken from the creator\'s own comment on the post.'
+              : `Recipe taken from a comment on the post by ${comment.author ?? 'another user'} — not the creator's own text.`,
+          );
+          if (comment.byOwner && comment.author) author = author ?? comment.author;
+        }
+        if (comment.byOwner && comment.links.length > 0) {
+          caption = `${caption}\n\nRecipe link posted by the creator in the comments: ${comment.links.join(' ')}`.trim();
+        }
+      }
+    }
+  }
 
   const fallbackSite = platform === 'instagram' ? 'Instagram' : 'Facebook';
   return {
     platform,
     text: caption,
     title: best.title,
-    author: best.author,
+    author,
     siteName: best.siteName ?? fallbackSite,
     html: best.html,
     videoUrl: state.videoUrl,
     imageUrl: state.imageUrl,
     truncated,
+    ...(sourceNotes.length ? { sourceNotes } : {}),
+    ...(commentsUnavailable ? { commentsUnavailable: true } : {}),
   };
 }
 

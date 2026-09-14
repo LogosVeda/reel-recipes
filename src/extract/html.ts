@@ -72,6 +72,8 @@ export interface MetaInfo {
   ogImage: string | null;
   siteName: string | null;
   author: string | null;
+  /** Canonical URL the page declares (og:url) — resolves share links to the real post */
+  ogUrl: string | null;
   /**
    * Facebook/Instagram advertise their oEmbed endpoint with a <link> whose
    * title attribute carries the FULL caption — on some page variants the
@@ -90,6 +92,7 @@ export function extractMeta(html: string): MetaInfo {
     ogImage: null,
     siteName: null,
     author: null,
+    ogUrl: null,
     oembedTitle: null,
   };
 
@@ -130,6 +133,9 @@ export function extractMeta(html: string): MetaInfo {
         break;
       case 'og:site_name':
         if (out.siteName === null) out.siteName = content;
+        break;
+      case 'og:url':
+        if (out.ogUrl === null && /^https?:\/\//.test(content)) out.ogUrl = content;
         break;
       case 'author':
         if (out.author === null) out.author = content;
@@ -254,3 +260,7 @@ export function looksTruncated(s: string | null): boolean {
   if (!s) return false;
   return /(\.\.\.|\u2026)\s*$/.test(s.trim());
 }
+
+/** Captions that point at the comments for the recipe ("recipe in comments 👇"). */
+export const COMMENTS_HINT_RE =
+  /recipe[^.\n]{0,40}(?:\bin\b|below)[^.\n]{0,20}comments?|comments?\s*(?:👇|⬇|below)|(?:see|check)\s+(?:the\s+)?comments|link\s+in\s+(?:the\s+)?comments|przepis[^.\n]{0,30}komentarz|рецепт[^.\n]{0,30}коммент|receta[^.\n]{0,30}comentarios/iu;

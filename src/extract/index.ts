@@ -2,7 +2,8 @@
 // site provides it, otherwise caption/description text → LLM structuring.
 import type { AudioOutcome, DeviceInput, Env, ExtractResult, FetchedContent, Ingredient, Platform, Recipe, Step } from '../types.js';
 import { extractJsonLdRecipe } from './jsonld.js';
-import { looksTruncated } from './html.js';
+import { COMMENTS_HINT_RE, looksTruncated } from './html.js';
+export { COMMENTS_HINT_RE };
 import { detectPlatform, fetchContent, fetchImageBytes, fetchVideoBytes, fetchYouTubeTranscript, youTubeVideoId } from './platforms.js';
 import { validateUrl } from './url.js';
 import { bytesToBase64, dishNameInEnglish, llmAvailable, looksLikeRecipeText, readImageText, sniffImageType, structureRecipeImage, structureRecipeText, transcribeAudio, transcriptionAvailable } from '../llm.js';
@@ -177,9 +178,12 @@ async function extractFromContent(
     // a false positive is harmless). The user-facing warning needs certainty:
     // only show it when the caption visibly ends in Facebook's own ellipsis —
     // captions ending in a signoff ("Happy cooking, Adam x") are complete.
-    extraNotes: content.truncated && looksTruncated(text)
-      ? [`${platformName(platform)} cut the description short — check the original post in case final steps are missing.`]
-      : [],
+    extraNotes: [
+      ...(content.sourceNotes ?? []),
+      ...(content.truncated && looksTruncated(text)
+        ? [`${platformName(platform)} cut the description short — check the original post in case final steps are missing.`]
+        : []),
+    ],
     depth: settings.depth,
     budget: settings.budget,
   };
@@ -224,6 +228,19 @@ async function extractFromContent(
     if (fromCover) return fromCover;
     const dish = captionResult.dishGuess ?? spoken.dish ?? ytSpoken.dish ?? null;
     const dishEn = captionResult.dishGuessEn ?? spoken.dishEn ?? ytSpoken.dishEn ?? null;
+    // The creator said the recipe is in the comments and Facebook did not hand
+    // them over just now (a stub page, a stream error). A substitute recipe
+    // here would be wrong-and-confident; ask for one more try instead.
+    if (content.commentsUnavailable) {
+      return {
+        ok: false,
+        code: 'no_recipe_found',
+        message: `${dish ? `This looks like ${dish}. ` : ''}The caption says the recipe is in the comments, but ${platformName(platform)} didn't hand the comments over just now — this usually clears in a moment, so try the link again. If it keeps failing, copy the creator's comment and paste it here.`,
+        fetchedText: text.slice(0, 4000),
+        dishGuess: dish ?? undefined,
+        audio: ytSpoken.audio ?? spoken.audio,
+      };
+    }
     // The caption plainly lists quantities and still no model would structure
     // it (every retry included). Substituting a stranger's recipe here would
     // be worse than the failure — hand the text back for a retry or a paste.
@@ -262,6 +279,15 @@ async function extractFromContent(
   const fromCover = await tryCoverImage(env, content, url.toString());
   if (fromCover) return fromCover;
   const coverScanned = content.imageUrl !== null;
+  if (content.commentsUnavailable) {
+    return {
+      ok: false,
+      code: 'no_recipe_found',
+      message: `The recipe is in the post's comments, but ${platformName(platform)} didn't hand the comments over just now — this usually clears in a moment, so try the link again. If it keeps failing, copy the creator's comment and paste it here.`,
+      fetchedText: text ? text.slice(0, 4000) : undefined,
+      audio: ytSpoken.audio ?? spoken.audio,
+    };
+  }
   let dish = spoken.dish ?? ytSpoken.dish ?? null;
   let dishEn = spoken.dishEn ?? ytSpoken.dishEn ?? null;
   if (!dish && content.title && llmAvailable(env)) {
@@ -563,10 +589,6 @@ export function isThinSpokenRecipe(recipe: { ingredients: Ingredient[]; steps: S
   if (quantified > 0) return false;
   return recipe.ingredients.length < 6 || recipe.steps.length < 4;
 }
-
-/** Captions that point at the comments for the recipe ("recipe in comments 👇"). */
-export const COMMENTS_HINT_RE =
-  /recipe[^.\n]{0,40}(?:\bin\b|below)[^.\n]{0,20}comments?|comments?\s*(?:👇|⬇|below)|(?:see|check)\s+(?:the\s+)?comments|link\s+in\s+(?:the\s+)?comments|przepis[^.\n]{0,30}komentarz|рецепт[^.\n]{0,30}коммент|receta[^.\n]{0,30}comentarios/iu;
 
 /**
  * Path 3: the page published its own og:video — download it, transcribe the
