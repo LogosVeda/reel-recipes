@@ -416,7 +416,7 @@ async function findSimilarRecipe(
         notes: [
           paywalled
             ? `The creator of the video keeps their exact recipe behind a subscription, so this is a similar ${dish} recipe from ${host} — not the creator's own version.`
-            : `The video didn't include its recipe, so this is a similar ${dish} recipe from ${host}.`,
+            : `The video didn't include a written recipe, so this is a similar ${dish} recipe from ${host} — not the creator's own version. If the creator posted theirs in the comments, paste that text to get it instead.`,
           `Original video: ${originalUrl}`,
         ],
         url: candidate,
@@ -542,11 +542,31 @@ function noRecipeMessage(platform: Platform, caption: string, audio: AudioOutcom
     parts.push(
       platform === 'youtube'
         ? `Open the video's description, copy the recipe text and paste it here — or send a screenshot of it. (Setting a free YouTube API key on this deployment removes this step for everyone.)`
-        : `If the recipe is in the comments or shown on screen, screenshot it and use the screenshots option — comments are the one thing ${name} hides from every app.`
+        : COMMENTS_HINT_RE.test(caption)
+          ? `The caption says the recipe is in the comments — the one thing ${name} hides from every app. Open the post, copy the creator's comment and paste it here; it will be written up from that.`
+          : `On ${name} the creator usually posts the full recipe as a comment on the video — the one thing ${name} hides from every app. Open the post, copy the creator's comment and paste it here; it will be written up from that.`
     );
   }
   return parts.join(' ');
 }
+
+/**
+ * A "recipe" the model assembled from speech alone can be a 15-second clip's
+ * worth of words: four unquantified ingredients and "bake it". Presenting
+ * that as the recipe is worse than admitting the recipe was not spoken —
+ * the written version is usually one comment away. Spoken recipes with no
+ * quantities are only trusted when they are substantial (many ingredients
+ * AND a real method).
+ */
+export function isThinSpokenRecipe(recipe: { ingredients: Ingredient[]; steps: Step[] }): boolean {
+  const quantified = recipe.ingredients.filter((i) => i.qty !== null).length;
+  if (quantified > 0) return false;
+  return recipe.ingredients.length < 6 || recipe.steps.length < 4;
+}
+
+/** Captions that point at the comments for the recipe ("recipe in comments 👇"). */
+export const COMMENTS_HINT_RE =
+  /recipe[^.\n]{0,40}(?:\bin\b|below)[^.\n]{0,20}comments?|comments?\s*(?:👇|⬇|below)|(?:see|check)\s+(?:the\s+)?comments|link\s+in\s+(?:the\s+)?comments|przepis[^.\n]{0,30}komentarz|рецепт[^.\n]{0,30}коммент|receta[^.\n]{0,30}comentarios/iu;
 
 /**
  * Path 3: the page published its own og:video — download it, transcribe the
@@ -590,6 +610,12 @@ async function transcribeAndStructure(
     // the caller still has the cover scan and the similar-recipe search to
     // try. Hand back what we learned (the dish, if named) and keep going.
     return { result: null, audio: 'checked', dish: result.dishGuess ?? null, dishEn: result.dishGuessEn ?? null };
+  }
+  if (result.ok && isThinSpokenRecipe(result.recipe)) {
+    // A few unquantified words from a short clip is not the recipe — keep
+    // the dish name and let the funnel look for a written version.
+    console.log(JSON.stringify({ evt: 'thin_spoken_recipe', ingredients: result.recipe.ingredients.length, steps: result.recipe.steps.length, title: result.recipe.title.slice(0, 60) }));
+    return { result: null, audio: 'checked', dish: result.recipe.title, dishEn: null };
   }
   return { result, audio: 'checked' };
 }
@@ -792,6 +818,13 @@ async function structureWithLlm(env: Env, text: string, ctx: LlmContext): Promis
     confidence: text.length > 400 ? 'medium' : 'low',
     createdAt: new Date().toISOString(),
   };
+  if (ctx.extractedFrom === 'transcript') {
+    const quantified = recipe.ingredients.filter((i) => i.qty !== null).length;
+    if (quantified * 2 < recipe.ingredients.length) {
+      recipe.confidence = 'low';
+      recipe.notes.unshift('Written up from what is said in the video — most amounts were not spoken, so check them against the video or the creator\'s comment.');
+    }
+  }
   await saveRecipe(env, recipe);
   return { ok: true, recipe };
 }

@@ -147,3 +147,28 @@ describe('titlesPlausiblyMatch: similar-recipe guard', () => {
     expect(titlesPlausiblyMatch('cake', 'Sour Cream Coffee Cake with Cinnamon-Walnut Swirl and Espresso Glaze')).toBe(false);
   });
 });
+
+describe('spoken-recipe quality gate', async () => {
+  const { isThinSpokenRecipe, COMMENTS_HINT_RE } = await import('../src/extract/index');
+  const ing = (item: string, qty: number | null = null) => ({ raw: item, qty, qtyHigh: null, unit: null, item, note: null, group: null });
+  const step = (text: string) => ({ text, minutes: null, group: null });
+  it('rejects a 15-second clip summary (four unquantified ingredients, three vague steps)', () => {
+    expect(isThinSpokenRecipe({
+      ingredients: [ing('flour'), ing('sugar'), ing('yolk'), ing('wipes')],
+      steps: [step('Combine flour, sugar, and yolk mixes'), step('Bake in the pan'), step('Let it cool')],
+    })).toBe(true);
+  });
+  it('keeps a spoken recipe that has quantities', () => {
+    expect(isThinSpokenRecipe({ ingredients: [ing('flour', 250), ing('sugar'), ing('eggs', 2)], steps: [step('Mix'), step('Bake')] })).toBe(false);
+  });
+  it('keeps a long talk-through even without quantities', () => {
+    const many = ['flour', 'sugar', 'eggs', 'butter', 'milk', 'vanilla', 'salt'].map((i) => ing(i));
+    expect(isThinSpokenRecipe({ ingredients: many, steps: [step('a'), step('b'), step('c'), step('d')] })).toBe(false);
+  });
+  it('spots captions that send readers to the comments', () => {
+    expect(COMMENTS_HINT_RE.test('Fluffy cheesecake 😍 recipe in the comments 👇')).toBe(true);
+    expect(COMMENTS_HINT_RE.test('Full recipe below in comments!')).toBe(true);
+    expect(COMMENTS_HINT_RE.test('Przepis w komentarzu ⬇️')).toBe(true);
+    expect(COMMENTS_HINT_RE.test('Fluffy cheesecake 😍')).toBe(false);
+  });
+});

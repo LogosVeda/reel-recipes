@@ -97,7 +97,9 @@ Rules:
 - Keep the recipe's original language; do not translate.`;
 
 const TRANSCRIPT_NOTE =
-  'Part of this text is a transcription of a cooking video. Spoken recipes are conversational and often give incomplete quantities — still extract a usable recipe: the dish, every ingredient mentioned (amounts when spoken, otherwise qty null), and the method as steps. Set is_recipe to false ONLY if no dish is actually being prepared.\n\n';
+  'Part of this text is a transcription of a cooking video. Spoken recipes are conversational and often give incomplete quantities — still extract a usable recipe: the dish, every ingredient mentioned (amounts when spoken, otherwise qty null), and the method as steps. ' +
+  'Transcripts contain speech-recognition errors: fix obvious mis-hearings of ingredient names when the context makes them clear ("wipes" in a cheesecake is "egg whites"), never keep a non-food word as an ingredient. ' +
+  'A short clip that only names a few ingredients and gives neither quantities nor a complete method is NOT a usable recipe: set is_recipe to false and fill dish_guess with the dish being made, so a written version can be looked for instead.\n\n';
 
 export interface LlmRecipeResult {
   isRecipe: boolean;
