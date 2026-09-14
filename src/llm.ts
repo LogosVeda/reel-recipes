@@ -284,7 +284,9 @@ async function callClaude(
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: 'claude-opus-4-8',
+        // Opus by default; ANTHROPIC_MODEL (e.g. claude-sonnet-5) trades a
+        // little extraction quality for a much smaller bill per recipe.
+        model: env.ANTHROPIC_MODEL || 'claude-opus-4-8',
         max_tokens: body.maxTokens ?? 16000,
         // Extraction is a deterministic task; sampling at the default
         // temperature is what lets the same caption get two different verdicts.
@@ -401,6 +403,9 @@ async function runWorkersAi(env: Env, text: string, isTranscript = false): Promi
         { role: 'user', content: `${isTranscript ? TRANSCRIPT_NOTE : ''}Extract the recipe from the following text:\n\n<text>\n${text}\n</text>` },
       ],
       max_tokens: 8192,
+      // Extraction is deterministic work; at the default sampling temperature
+      // the same caption gets "no recipe" one minute and a full recipe the next.
+      temperature: 0,
     });
   if (typeof payload !== 'string') return payload;
   return parseModelJson(payload);

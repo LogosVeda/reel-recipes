@@ -147,6 +147,8 @@ export interface Env {
   ASSETS?: Fetcher;
   LLM_PROVIDER?: string;
   ANTHROPIC_API_KEY?: string;
+  /** Claude model id for extraction; defaults to claude-opus-4-8 */
+  ANTHROPIC_MODEL?: string;
   // Vercel (or any host without Cloudflare KV): Upstash Redis REST credentials.
   UPSTASH_REDIS_REST_URL?: string;
   UPSTASH_REDIS_REST_TOKEN?: string;
